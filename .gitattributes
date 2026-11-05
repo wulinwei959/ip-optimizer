@@ -1,7 +1,7 @@
-# Keep every text file LF on checkout. CRLF in cmd/main, cmd/common,
-# service-setup or *.sh breaks "#!/bin/bash" and the fnOS lifecycle scripts.
+# 所有文本文件在检出时统一为 LF。cmd/main、cmd/common、service-setup 或 *.sh
+# 一旦带上 CRLF，会破坏 "#!/bin/bash" 与 fnOS 生命周期脚本。
 * text=auto eol=lf
 
-# Explicit binaries (never normalize).
+# 显式声明二进制，避免被当作文本做换行转换
 *.png binary
 *.fpk binary
