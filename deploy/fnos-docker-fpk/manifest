@@ -1,0 +1,15 @@
+appname=hosts-optimizer
+version=1.0.0
+display_name=Hosts 优选订阅
+desc=定时为自定义域名优选可用 IP，生成 hosts / AdGuard Home 订阅文件。
+source=thirdparty
+platform=all
+maintainer=your-org
+maintainer_url=https://github.com/your-org/hosts-optimizer
+distributor=your-org
+distributor_url=https://github.com/your-org/hosts-optimizer
+os_min_version=1.2.0
+service_port=18088
+checkport=true
+ctl_stop=true
+changelog=首个版本：基础优选与订阅生成。

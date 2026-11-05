@@ -1,0 +1,22 @@
+# Build artifacts (binary FPK packages and compiled binaries)
+deploy/dist/
+*.fpk
+/hosts-optimizer
+/hosts-optimizer.exe
+*.exe
+
+# Local runtime state: config overrides, generated subscriptions, state files
+core/run/
+
+# Local env / secrets (keep the .env.example templates tracked)
+.env
+*.log
+*.pid
+*.crt
+
+# Editor / OS junk
+.DS_Store
+Thumbs.db
+
+# CodeBuddy local project data
+.codebuddy/

@@ -1,0 +1,7 @@
+# Keep every text file LF on checkout. CRLF in cmd/main, cmd/common,
+# service-setup or *.sh breaks "#!/bin/bash" and the fnOS lifecycle scripts.
+* text=auto eol=lf
+
+# Explicit binaries (never normalize).
+*.png binary
+*.fpk binary

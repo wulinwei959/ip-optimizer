@@ -1,0 +1,26 @@
+#!/bin/bash
+# Docker 类 FPK：启停由应用中心执行 compose，这里 start/stop 只需返回成功。
+# status 必须真实检查容器状态：0=运行中，3=未运行，1=失败。
+set -u
+
+CONTAINER="hosts-optimizer-fpk"
+
+is_running() {
+  [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ]
+}
+
+case "${1:-}" in
+  start)
+    exit 0
+    ;;
+  stop)
+    exit 0
+    ;;
+  status)
+    if is_running; then exit 0; else exit 3; fi
+    ;;
+  *)
+    echo "Unknown action: ${1:-}" > "${TRIM_TEMP_LOGFILE:-/dev/null}"
+    exit 1
+    ;;
+esac

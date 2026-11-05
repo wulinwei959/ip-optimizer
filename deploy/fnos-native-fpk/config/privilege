@@ -1,0 +1,7 @@
+{
+  "defaults": {
+    "run-as": "package"
+  },
+  "username": "hosts-optimizer-native",
+  "groupname": "hosts-optimizer-native"
+}

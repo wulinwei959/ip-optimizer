@@ -1,0 +1,17 @@
+appname=hosts-optimizer-native
+version=1.0.0
+display_name=Hosts 优选订阅（原生）
+desc=飞牛原生服务：定时为自定义域名优选可用 IP，生成 hosts / AdGuard Home 订阅文件。单静态二进制，无 Docker、无运行时依赖。
+source=thirdparty
+platform=x86
+maintainer=your-org
+maintainer_url=https://github.com/your-org/hosts-optimizer
+distributor=your-org
+distributor_url=https://github.com/your-org/hosts-optimizer
+os_min_version=1.2.0
+service_port=18088
+checkport=true
+ctl_stop=true
+changelog=首个版本：单静态二进制 + systemd 原生运行，安装过程完全离线。
+desktop_uidir=ui
+desktop_applaunchname=hosts-optimizer-native.main

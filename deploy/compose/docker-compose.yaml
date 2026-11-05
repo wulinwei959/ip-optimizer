@@ -1,0 +1,29 @@
+# 轨道 A（已冻结为可选形态）：通用 Docker Compose
+# 配置 ./config/domains.json，产物 ./output/{hosts.txt,agh.txt,status.json}
+services:
+  hosts-optimizer:
+    image: ${HO_IMAGE:-ghcr.io/your-org/hosts-optimizer:1.0.0}
+    container_name: hosts-optimizer
+    restart: unless-stopped
+    # 关键：绕开 AdGuard Home，否则「用待优化的解析结果去找候选 IP」形成循环依赖
+    dns:
+      - 223.5.5.5
+      - 119.29.29.29
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      HO_CONFIG: /config
+      HO_OUTPUT: /output
+      HO_STATE: /state
+      HO_PORT: 8088
+      HO_SCHEDULE_MINUTES: ${HO_SCHEDULE_MINUTES:-60}
+      HO_PROBE_DNS: ${HO_PROBE_DNS:-223.5.5.5,119.29.29.29}
+      HO_PROBE_CONCURRENCY: ${HO_PROBE_CONCURRENCY:-20}
+    volumes:
+      - ./config:/config
+      - ./output:/output
+      - ./state:/state
+    ports:
+      - "${HO_HTTP_PORT:-8088}:8088"
+    # healthcheck 省略：单二进制镜像内没有 curl/python。
+    # 若镜像内含 curl，可加：test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8088/status.json"]
+    # 如需限制权限，可追加：read_only: true + tmpfs（产物目录仍需可写）

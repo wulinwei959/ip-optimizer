@@ -1,0 +1,20 @@
+[
+  {
+    "stepTitle": "订阅说明",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "本应用是飞牛原生服务：单个静态二进制运行，不依赖 Docker，也不需要 Python / Node 运行时，安装过程完全离线。安装后在 AdGuard Home 的「过滤器 → DNS 封锁清单」添加：http://&lt;NAS内网IP&gt;:18088/hosts.txt，并把更新间隔改为 1 小时。"
+      }
+    ]
+  },
+  {
+    "stepTitle": "添加域名",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "安装后编辑 /var/apps/hosts-optimizer-native/etc/domains.json，在 domains 数组中追加域名即可；探测周期在 defaults.schedule_minutes（分钟）设置。请确认已下载与设备架构一致的 x86 或 arm 安装包。"
+      }
+    ]
+  }
+]

@@ -1,0 +1,35 @@
+#!/bin/bash
+# 安装后初始化：目录、默认域名清单、二进制自检。必须可重复执行。
+# 全程离线：不联网、不安装运行时、不创建虚拟环境。
+set -u
+
+fail() {
+  echo "$1" > "${TRIM_TEMP_LOGFILE:-/dev/null}"
+  exit 1
+}
+
+BIN="${TRIM_APPDEST}/bin/hosts-optimizer"
+[ -x "$BIN" ] || fail "缺少与设备架构匹配的可执行文件，请改用 x86 / arm 对应的安装包。"
+
+mkdir -p "${TRIM_PKGETC}" "${TRIM_PKGVAR}/output" "${TRIM_PKGVAR}/state" || fail "无法创建应用目录，请检查存储空间。"
+
+# Windows 打包会丢失 Unix 执行位（目录变 0644 无法进入、二进制无 x 无法执行）。
+# 在真机（Linux）安装时补回，避免后续读取 domains.json / 拉起二进制失败。
+PKGROOT="$(dirname "$TRIM_APPDEST")"
+for d in "$TRIM_PKGETC" "$TRIM_APPDEST" "$TRIM_APPDEST/ui" "$TRIM_APPDEST/ui/images" "$PKGROOT/cmd" "$PKGROOT/wizard" "$PKGROOT/config"; do
+  [ -d "$d" ] && chmod 755 "$d" 2>/dev/null || true
+done
+chmod 755 "$BIN" 2>/dev/null || true
+chmod 644 "$PKGROOT/cmd"/* "$PKGROOT/wizard"/* "$PKGROOT/config"/* 2>/dev/null || true
+chmod 644 "$TRIM_APPDEST/ui/config" "$TRIM_APPDEST/ui/images"/* 2>/dev/null || true
+
+# 单一配置源：domains.json。调度周期写在 defaults.schedule_minutes，不再用 cron 表达式。
+if [ ! -f "${TRIM_PKGETC}/domains.json" ]; then
+  if [ -f "${TRIM_APPDEST}/domains.example.json" ]; then
+    cp "${TRIM_APPDEST}/domains.example.json" "${TRIM_PKGETC}/domains.json" || fail "无法写入默认域名清单。"
+  else
+    printf '%s\n' '{"domains":[],"defaults":{"schedule_minutes":60}}' > "${TRIM_PKGETC}/domains.json" || fail "无法写入默认域名清单。"
+  fi
+fi
+
+exit 0

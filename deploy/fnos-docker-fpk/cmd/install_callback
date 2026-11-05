@@ -1,0 +1,17 @@
+#!/bin/bash
+# 安装后初始化：目录、默认域名清单。必须可重复执行。
+# 与原生轨道共用 domains.json；不再写 settings.env（cron 值里的空格会破坏 shell source）。
+set -u
+
+fail() {
+  echo "$1" > "${TRIM_TEMP_LOGFILE:-/dev/null}"
+  exit 1
+}
+
+mkdir -p "${TRIM_PKGETC}" "${TRIM_PKGVAR}/output" "${TRIM_PKGVAR}/state" || fail "无法创建应用目录，请检查存储空间。"
+
+if [ ! -f "${TRIM_PKGETC}/domains.json" ]; then
+  printf '%s\n' '{"domains":[],"defaults":{"schedule_minutes":60}}' > "${TRIM_PKGETC}/domains.json" || fail "无法写入默认域名清单。"
+fi
+
+exit 0
