@@ -1,0 +1,23 @@
+{
+  "_readme": "手动添加域名：在 domains 数组里追加对象即可；保存后下一轮自动生效，也可 POST /refresh 立即重跑。本文件是 JSON，不支持注释；字段说明见 deploy/config-schema/README.md。",
+  "domains": [
+    { "name": "github.com" },
+    {
+      "name": "raw.githubusercontent.com",
+      "sni": "raw.githubusercontent.com",
+      "port": 443
+    }
+  ],
+  "defaults": {
+    "schedule_minutes": 60,
+    "probe_dns": ["223.5.5.5", "119.29.29.29"],
+    "probe_port": 443,
+    "concurrency": 20,
+    "hysteresis_percent": 20,
+    "hysteresis_rounds": 2,
+    "max_candidates": 64,
+    "tcp_rounds": 3,
+    "timeout_seconds": 3,
+    "outputs": ["hosts.txt", "agh.txt", "status.json"]
+  }
+}

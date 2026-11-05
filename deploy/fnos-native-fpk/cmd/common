@@ -1,0 +1,64 @@
+#!/bin/bash
+# cmd/common: fnOS standard daemon helper. Source this from cmd/main and cmd/service-setup.
+# Provides: daemon_status, start_daemon, stop_daemon.
+# Relies on vars defined by service-setup: SERVICE_COMMAND, SVC_WRITE_PID, LOG_FILE,
+# PID_FILE, BIN, TRIM_APPNAME. (main sources common first, then service-setup; the
+# functions below are only invoked after both are sourced, so the vars are defined.)
+
+# True when the daemon is alive and the PID actually belongs to our binary.
+daemon_status() {
+  [ -f "$PID_FILE" ] || return 1
+  local pid
+  pid=$(cat "$PID_FILE" 2>/dev/null)
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  # Guard against a stale or reused PID: confirm it is our binary.
+  grep -q "hosts-optimizer" "/proc/$pid/cmdline" 2>/dev/null || return 1
+  return 0
+}
+
+# Start the daemon in the background and record its PID.
+start_daemon() {
+  mkdir -p "$(dirname "$PID_FILE")" "$(dirname "$LOG_FILE")" 2>/dev/null || true
+  if daemon_status; then
+    return 0
+  fi
+  rm -f "$PID_FILE"
+
+  # Use eval so $! is the real binary PID (no intermediate shell that could
+  # orphan the process and break daemon_status / stop_daemon).
+  eval "nohup $SERVICE_COMMAND >> '${LOG_FILE}' 2>&1 &"
+  local pid=$!
+  if [ "${SVC_WRITE_PID:-n}" = "y" ]; then
+    echo "$pid" > "$PID_FILE"
+  fi
+
+  # Settle briefly, then verify it stayed up.
+  sleep 1
+  if daemon_status; then
+    return 0
+  fi
+  echo "$(date) start_daemon: process did not stay up" >> "$LOG_FILE"
+  return 1
+}
+
+# Stop the daemon by PID, with a graceful-then-force sequence, plus a name-based
+# safety net in case the process was orphaned.
+stop_daemon() {
+  if [ -f "$PID_FILE" ]; then
+    local pid
+    pid=$(cat "$PID_FILE" 2>/dev/null)
+    if [ -n "$pid" ]; then
+      kill "$pid" 2>/dev/null || true
+      local i
+      for i in 1 2 3 4 5 6; do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 1
+      done
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PID_FILE"
+  fi
+  pkill -f "hosts-optimizer" 2>/dev/null || true
+  return 0
+}

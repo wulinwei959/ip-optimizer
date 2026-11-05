@@ -1,0 +1,25 @@
+[
+  {
+    "stepTitle": "订阅说明",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "安装完成后，在 AdGuard Home 的「过滤器 → DNS 封锁清单」添加自定义列表：http://&lt;NAS内网IP&gt;:18088/hosts.txt，并把过滤器更新间隔改为 1 小时。订阅地址请使用 NAS 内网 IP，不要使用本服务正在优化的域名。"
+      }
+    ]
+  },
+  {
+    "stepTitle": "运行参数",
+    "items": [
+      {
+        "type": "text",
+        "field": "wizard_schedule",
+        "label": "探测周期（cron 表达式）",
+        "initValue": "*/60 * * * *",
+        "rules": [
+          { "required": true, "message": "请填写探测周期" }
+        ]
+      }
+    ]
+  }
+]

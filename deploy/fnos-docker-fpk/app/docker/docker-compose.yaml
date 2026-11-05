@@ -1,0 +1,30 @@
+# 轨道 B（已冻结为可选形态）：由 fnOS 应用中心按 config/resource 的 docker-project 声明执行。
+# path="docker" 相对 app/ 目录，对应本文件。版本 tag 需与 manifest.version 对齐。
+services:
+  hosts-optimizer:
+    image: ghcr.io/your-org/hosts-optimizer:1.0.0
+    container_name: hosts-optimizer-fpk
+    restart: unless-stopped
+    # 绕开 AdGuard Home，避免探测 DNS 与订阅端点形成循环依赖
+    dns:
+      - 223.5.5.5
+      - 119.29.29.29
+    environment:
+      TZ: Asia/Shanghai
+      HO_CONFIG: /config
+      HO_OUTPUT: /output
+      HO_STATE: /state
+      HO_PORT: 8088
+      HO_SCHEDULE_MINUTES: 60
+      HO_PROBE_DNS: 223.5.5.5,119.29.29.29
+      HO_PROBE_CONCURRENCY: 20
+    volumes:
+      # TRIM_PKGETC / TRIM_PKGVAR 由应用中心注入；target 目录只读，运行时数据必须写 var
+      - ${TRIM_PKGETC}:/config
+      - ${TRIM_PKGVAR}/output:/output
+      - ${TRIM_PKGVAR}/state:/state
+    ports:
+      # 与 manifest.service_port 保持一致（单端口约束）
+      - "18088:8088"
+    # healthcheck 省略：镜像内不含 curl/python。若镜像含 curl，
+    # 可加 test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8088/status.json"]

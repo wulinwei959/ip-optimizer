@@ -1,0 +1,30 @@
+#!/bin/bash
+# 原生 FPK 服务声明：直接执行包内静态二进制。
+# 参考 fnos-apps/apps/gopeed/fnos/cmd/service-setup 与官方 cmd/main 示例（./myapp &）。
+# 不声明 install_dep_apps、不建 venv、不改 PATH —— 安装与启动全程离线。
+
+LOG_FILE="${TRIM_PKGVAR}/${TRIM_APPNAME}.log"
+PID_FILE="${TRIM_PKGVAR}/${TRIM_APPNAME}.pid"
+BIN="${TRIM_APPDEST}/bin/hosts-optimizer"
+
+mkdir -p "${TRIM_PKGVAR}/output" "${TRIM_PKGVAR}/state"
+
+# 所有路径通过 HO_* 注入，不硬编码 /volN。
+# 变量显式写进 SERVICE_COMMAND 而不是只做 export：该命令由平台另起 shell 执行，
+# 显式注入不依赖 service-setup 的 source 作用域（Gopeed 实证也是把一切写进命令）。
+# 不再注入 HO_CA_BUNDLE：包内不携带 ca-bundle.crt，二进制会回落到系统证书池
+# （已在真机验证可对 github.com / raw.githubusercontent.com 完成 TLS 校验）。
+SERVICE_COMMAND="env HO_CONFIG=${TRIM_PKGETC} HO_OUTPUT=${TRIM_PKGVAR}/output HO_STATE=${TRIM_PKGVAR}/state HO_PORT=${TRIM_SERVICE_PORT} HO_TZ=Asia/Shanghai ${BIN}"
+SVC_BACKGROUND=y
+SVC_WRITE_PID=y
+
+service_preuninst() {
+  if [ -f "$PID_FILE" ]; then
+    kill "$(cat "$PID_FILE")" 2>/dev/null || true
+    rm -f "$PID_FILE"
+  fi
+}
+
+service_poststop() {
+  service_preuninst
+}

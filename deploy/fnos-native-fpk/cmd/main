@@ -1,0 +1,26 @@
+#!/bin/bash
+# cmd/main: lifecycle entry invoked by fnOS App Center with start|stop|status.
+# Source the standard helper and the service declaration, then delegate.
+COMMON="$(dirname "$0")/common"
+[ -r "$COMMON" ] && . "$COMMON"
+SVC_SETUP="$(dirname "$0")/service-setup"
+[ -r "$SVC_SETUP" ] && . "$SVC_SETUP"
+
+case "${1:-}" in
+  start)
+    if daemon_status; then exit 0; fi
+    start_daemon
+    exit $?
+    ;;
+  stop)
+    stop_daemon
+    exit 0
+    ;;
+  status)
+    if daemon_status; then exit 0; else exit 3; fi
+    ;;
+  *)
+    echo "Unknown action: ${1:-}" > "${TRIM_TEMP_LOGFILE:-/dev/null}"
+    exit 1
+    ;;
+esac
