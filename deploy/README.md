@@ -19,25 +19,32 @@
 - **Go + 仅标准库**：`net/http`（单端口服务）、`crypto/tls`（SNI 证书校验）、`encoding/json`（配置）、`net`（自定义 DNS 查询，可手写 UDP 53 报文或用纯 Go `net.Resolver`）、`time.Ticker`（进程内定时）、`os.Rename`（原子写）。全部标准库，无 `go mod download`。
 - **唯一一次性联网**：在本机装 Go SDK（单个安装包）。之后所有构建离线；`build-native-fpk.sh` 设 `GOPROXY=off GOSUMDB=off`，一旦误引入第三方依赖会**直接构建失败**而不是偷偷联网。
 - **交叉编译**：Windows 上 `GOOS=linux GOARCH=amd64|arm64 CGO_ENABLED=0 go build` 直接产出 Linux 静态 ELF，不需要 Linux 机器、Docker daemon、基础镜像。
-- **CA 根证书**：静态二进制不自带系统信任库。核心优先 `x509.SystemCertPool()`（fnOS 为 Debian 系，一般可用），失败时回落 `HO_CA_BUNDLE` 指向的随包 `ca-bundle.crt`（可选，放到 `deploy/ca-bundle.crt` 即会被脚本带入包）。
+- **CA 根证书**：静态二进制不自带系统信任库。核心优先 `x509.SystemCertPool()`（fnOS 为 Debian 系，一般可用）；`HO_CA_BUNDLE` 指向的随包 `ca-bundle.crt` 为可选增强（放到 `deploy/ca-bundle.crt` 即会被构建脚本带入包）。**文件不存在时仅告警并降级为系统证书池，不致命退出** —— 早期把它当致命错误处理，曾导致 `Restart=always` 无限重启。
 - **配置用 JSON**：YAML 需要第三方模块。调度改为 `defaults.schedule_minutes`（整数分钟），进程内定时，不依赖宿主 crontab（非 root 也装不了）。
 
-## 构建（本机，Windows Git Bash 可用）
+## 构建（本机离线）
 
 一次性准备：
 
-1. 安装 Go SDK
-2. 下载 fnpack 1.2.3 Windows 二进制，重命名为 `fnpack` 加入 PATH（或用 `FNPACK=/path` 指定）
-3. 实现核心工程放到 `core/`（含 `go.mod` 与 `./cmd/hosts-optimizer`）
+1. 安装 Go SDK（≥ 1.21）
+2. 下载 fnpack 1.2.3，重命名为 `fnpack` 加入 PATH（或用 `FNPACK=/path` 指定）
+3. 核心工程已在 `core/`（含 `go.mod` 与 `./cmd/hosts-optimizer`）
+
+Linux / macOS / Git Bash：
 
 ```bash
-# 只编译、验证产物（不需要 fnpack）
-SKIP_PACK=1 ./deploy/scripts/build-native-fpk.sh x86
-
-# 打两个架构的包
+SKIP_PACK=1 ./deploy/scripts/build-native-fpk.sh x86   # 只编译，不调 fnpack
 ./deploy/scripts/build-native-fpk.sh x86
 ./deploy/scripts/build-native-fpk.sh arm
 # → deploy/dist/hosts-optimizer-native-1.0.0-x86.fpk / -arm.fpk
+```
+
+Windows PowerShell（开发机没有 bash / pwsh 时用这份等价脚本；脚本为纯 ASCII，规避中文 GBK/UTF-8 编码问题）：
+
+```powershell
+powershell -NoProfile -File deploy/scripts/build-native-fpk.ps1 x86
+powershell -NoProfile -File deploy/scripts/build-native-fpk.ps1 arm
+$env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.ps1 x86
 ```
 
 `platform=all` **不再可用**（官方 `manifest.md`：`all` 仅当包内不含特定架构二进制）。脚本按参数把 `manifest` 改成 `platform=x86` / `arm`，因此必须分发两个包，用户按设备架构选。
@@ -48,7 +55,7 @@ SKIP_PACK=1 ./deploy/scripts/build-native-fpk.sh x86
 应用中心 → 右上角菜单 → 安装本地应用 → 选择 .fpk
 ```
 
-订阅地址 `http://<NAS内网IP>:18088/hosts.txt`，在 AdGuard Home「过滤器 → DNS 封锁清单」添加，更新间隔改为 1 小时。
+订阅地址：推荐 `http://<NAS内网IP>:18088/agh.txt`（覆盖子域且 AAAA 天然 NODATA），或 `http://<NAS内网IP>:18088/hosts.txt`。在 AdGuard Home「过滤器 → DNS 封锁清单」添加，更新间隔改为 1 小时。安装后也可从桌面图标打开的状态页一键复制订阅地址。
 
 打包校验要求：`manifest`、`config/privilege`(JSON)、`config/resource`(JSON)、`ICON.PNG`(64×64)、`ICON_256.PNG`(256×256)、`app/`、`cmd/`、`wizard/` 齐全。骨架已生成占位图标，**发布前替换**。
 
@@ -101,12 +108,17 @@ curl -X POST http://127.0.0.1:18088/refresh
 
 `go run ./cmd/hosts-optimizer -check-config` 只校验配置；`go test ./...` 跑离线单元测试。
 
-## 待办（真机阶段）
+## 当前状态与剩余工作
 
-1. 下载 fnpack，跑 `./deploy/scripts/build-native-fpk.sh x86` 与 `arm`，确认 `fnpack build` 通过并产出两个 `.fpk`
-2. 在专用 fnOS 测试设备安装，跑研究报告第 6 节验收清单
-3. **用真实公网域名核对**：`curl --resolve` 确认校验器淘汰错误 IP，观察一周 IP 抖动与滞回表现
+完整的「已验证 / 待验证」清单见仓库根 [`README.md`](../README.md)。
+
+**已完成**：`fnpack build` 通过并产出 x86 `.fpk`；真机安装后的无限重启已修复（`cmd/main` 改为 source `cmd/common` + `cmd/service-setup` 并调用 `start_daemon` / `stop_daemon` / `daemon_status`）；桌面入口（`desktop_uidir` + `app/ui/config` + 图标）已补齐；`install_callback` 在真机补回目录执行位；真实公网域名的 TLS 校验与产物生成已验证。
+
+**仍需**：
+
+1. 确认桌面图标在真机显示（覆盖安装后可能要 `systemctl restart trim_app_center.service`）
+2. 跑研究报告第 6 节完整验收清单（启停 / 重启 / 卸载重装 / 升级后配置与产物不丢 / AGH 订阅生效 / 全灭时保留上一轮）
+3. 用 `curl --resolve` 观察一周 IP 抖动与滞回表现
 4. 替换占位图标；用 `uname -m` 确认设备架构、选对安装包
-5. 若目标 fnOS 上 `x509.SystemCertPool()` 读不到系统 CA，放一份 `deploy/ca-bundle.crt`，构建脚本会随包携带
-
-> **状态声明**：核心已在本机完成编译与端到端验证（`GOPROXY=off` 零第三方依赖、`go vet`、4 个包单测、双架构静态 ELF、成功/失败两条端到端路径）。**仍未运行 `fnpack build`、未产出 `.fpk`、未在真实 fnOS 设备安装、未用真实公网域名验证优选效果**。
+5. 页面内在线编辑 `domains.json`（二期；当前需 SSH / 文件管理器编辑）
+6. 若个别精简版 fnOS 上 `x509.SystemCertPool()` 读不到系统 CA，放一份 `deploy/ca-bundle.crt`，构建脚本会随包携带
