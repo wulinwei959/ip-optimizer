@@ -1,22 +1,22 @@
-# Build artifacts (binary FPK packages and compiled binaries)
+# 构建产物：FPK 安装包与编译出的二进制
 deploy/dist/
 *.fpk
 /hosts-optimizer
 /hosts-optimizer.exe
 *.exe
 
-# Local runtime state: config overrides, generated subscriptions, state files
+# 本地运行态：配置覆盖、生成的订阅文件、状态文件
 core/run/
 
-# Local env / secrets (keep the .env.example templates tracked)
+# 本地环境与密钥（.env.example 模板需要纳入版本管理）
 .env
 *.log
 *.pid
 *.crt
 
-# Editor / OS junk
+# 编辑器与操作系统杂项
 .DS_Store
 Thumbs.db
 
-# CodeBuddy local project data
+# CodeBuddy 本地项目数据
 .codebuddy/
