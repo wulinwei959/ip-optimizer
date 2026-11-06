@@ -54,3 +54,22 @@ func TestNormalizeDomainNames(t *testing.T) {
 		t.Fatalf("去重/小写/去空格结果不符: %v", got)
 	}
 }
+
+func TestWithPendingDomains(t *testing.T) {
+	existing := []output.StatusDomain{
+		{Name: "github.com", IP: "1.1.1.1", Validated: 1, Reason: "保持"},
+	}
+	got := withPendingDomains(existing, []string{"github.com", "example.com", " ", "new.com"})
+	if len(got) != 3 {
+		t.Fatalf("合并后应有 3 条，实际 %d", len(got))
+	}
+	if got[0].Name != "github.com" || got[0].IP != "1.1.1.1" {
+		t.Fatalf("已有域名不应被覆盖: %+v", got[0])
+	}
+	if got[1].Name != "example.com" || got[1].Reason != "待探测" || got[1].IP != "" {
+		t.Fatalf("新域名应标记待探测: %+v", got[1])
+	}
+	if got[2].Name != "new.com" {
+		t.Fatalf("新域名顺序不符: %+v", got[2])
+	}
+}
