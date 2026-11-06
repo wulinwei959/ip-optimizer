@@ -1088,6 +1088,7 @@ th,td{border-bottom:1px solid var(--line);padding:12px;text-align:left;vertical-
 th{background:#f8fafc;font-weight:600;color:#374151;white-space:nowrap;font-size:13px}
 tbody tr:hover{background:#f9fafb}
 tbody tr:last-child td{border-bottom:none}
+tbody td:nth-child(5){white-space:nowrap}
 code{background:#eef2f7;padding:2px 6px;border-radius:5px;font-size:13px}
 .bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
 button{cursor:pointer;padding:8px 16px;border:1px solid #d7dce5;border-radius:8px;background:#fff;color:#1f2937;font-size:14px;font-family:inherit;transition:background .15s,border-color .15s,box-shadow .15s}
@@ -1304,6 +1305,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
   <option value="all">全部</option>
   <option value="ok">正常</option>
   <option value="fail">失败</option>
+  <option value="pending">待探测</option>
 </select>
 <select id="themeSel" title="主题">
   <option value="system">跟随系统</option>
@@ -1444,14 +1446,19 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 </tr>
 </thead><tbody>
 {{range $i, $d := .Domains}}
-<tr data-name="{{$d.Name}}" data-ip="{{$d.IP}}" data-reason="{{$d.Reason}}" data-status="{{$d.Validated}}">
+<tr data-name="{{$d.Name}}" data-ip="{{$d.IP}}" data-reason="{{$d.Reason}}" data-status="{{$d.Validated}}" data-pending="{{and (eq $d.IP "") (eq $d.Reason "待探测")}}">
   <td class="select-cell"><input type="checkbox" class="row-check" value="{{$d.Name}}"></td>
   <td class="truncate" title="{{$d.Name}}">{{$d.Name}}</td>
   <td class="truncate" title="{{$d.IP}}">{{$d.IP}}</td>
-  <td><button type="button" class="latency-btn" data-domain="{{$d.Name}}" title="查看全部候选 IP">{{$d.LatencyMS}} ms</button></td>
+  <td>{{if $d.IP}}<button type="button" class="latency-btn" data-domain="{{$d.Name}}" title="查看全部候选 IP">{{$d.LatencyMS}} ms</button>{{else}}—{{end}}</td>
   <td>
+    {{if and (eq $d.IP "") (eq $d.Reason "待探测")}}
+    <span class="status-dot status-unknown"></span>
+    待探测
+    {{else}}
     <span class="status-dot {{if $d.Validated}}status-ok{{else}}status-fail{{end}}"></span>
     {{if $d.Validated}}正常{{else}}失败{{end}}
+    {{end}}
   </td>
   <td>{{$d.Candidates}}/{{$d.Validated}}</td>
   <td>
@@ -1559,7 +1566,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
   };
   var btn = document.getElementById("refresh");
   // 刷新改为后台任务：POST 拿到 task_id 后轮询状态，避免长请求卡住页面。
-  function startRefresh(statusEl, done, domains) {
+  function startRefresh(statusEl, done, domains, retried) {
     statusEl.textContent = "正在轮询，请稍等";
     var opts = { method: "POST" };
     if (domains && domains.length) {
@@ -1572,6 +1579,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
         if (!x.body.ok || !x.body.task_id) {
           throw new Error(x.body.error || ("HTTP " + x.status));
         }
+        var reused = !!x.body.reused;
         var taskId = x.body.task_id;
         var timer = setInterval(function () {
           fetch("/api/refresh-status?task_id=" + encodeURIComponent(taskId))
@@ -1583,6 +1591,11 @@ tr.domain-row td:nth-child(2){padding-left:32px}
               }
               clearInterval(timer);
               if (s.state === "done") {
+                if (reused && !retried) {
+                  statusEl.textContent = "上一任务已完成，正在按最新配置重新探测...";
+                  startRefresh(statusEl, done, domains, true);
+                  return;
+                }
                 statusEl.textContent = "完成，AGH 订阅已同步，即将刷新页面";
                 if (done) done(true);
                 setTimeout(function () { location.reload(); }, 600);
@@ -1883,7 +1896,8 @@ tr.domain-row td:nth-child(2){padding-left:32px}
         return;
       }
       if (!thenRun) {
-        cfgMsg.textContent = "已保存，点\"生效\"触发生成";
+        cfgMsg.textContent = "已保存，正在刷新列表...";
+        setTimeout(function () { location.reload(); }, 400);
         return;
       }
       startRefresh(cfgMsg);
@@ -2174,8 +2188,10 @@ tr.domain-row td:nth-child(2){padding-left:32px}
         var ip = (tr.dataset.ip || "").toLowerCase();
         var reason = (tr.dataset.reason || "").toLowerCase();
         var validated = tr.dataset.status === "true";
+        var pending = tr.dataset.pending === "true";
         var match = !kw || name.indexOf(kw) >= 0 || ip.indexOf(kw) >= 0 || reason.indexOf(kw) >= 0;
-        var statusMatch = st === "all" || (st === "ok" && validated) || (st === "fail" && !validated);
+        var statusMatch = st === "all" || (st === "ok" && validated) ||
+          (st === "fail" && !validated && !pending) || (st === "pending" && pending);
         return match && statusMatch;
       });
       g.visible = visible;
@@ -2760,6 +2776,14 @@ func (a *App) index(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "服务正在初始化，请稍后重试", http.StatusServiceUnavailable)
 		return
 	}
+	domains := append([]output.StatusDomain(nil), snap.Status.Domains...)
+	if rt, err := config.Load(); err == nil {
+		names := make([]string, 0, len(rt.Config.Domains))
+		for _, d := range rt.Config.Domains {
+			names = append(names, d.Name)
+		}
+		domains = withPendingDomains(domains, names)
+	}
 	data := struct {
 		GeneratedAt     string
 		ScheduleMinutes int
@@ -2771,12 +2795,30 @@ func (a *App) index(w http.ResponseWriter, r *http.Request) {
 		GeneratedAt:     snap.Status.GeneratedAt.Format(time.RFC3339),
 		ScheduleMinutes: snap.Status.ScheduleMinutes,
 		ActiveCount:     snap.Status.ActiveCount,
-		DomainCount:     snap.Status.DomainCount,
+		DomainCount:     len(domains),
 		Ready:           snap.Ready,
-		Domains:         snap.Status.Domains,
+		Domains:         domains,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := indexTmpl.Execute(w, data); err != nil {
 		log.Printf("渲染首页失败: %v", err)
 	}
+}
+
+// withPendingDomains 把配置里尚未进入快照的域名补成「待探测」行。
+func withPendingDomains(domains []output.StatusDomain, names []string) []output.StatusDomain {
+	out := append([]output.StatusDomain(nil), domains...)
+	seen := make(map[string]bool, len(out)+len(names))
+	for _, d := range out {
+		seen[d.Name] = true
+	}
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, output.StatusDomain{Name: name, Reason: "待探测"})
+	}
+	return out
 }
