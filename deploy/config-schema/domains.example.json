@@ -1,11 +1,21 @@
 {
-  "_readme": "手动添加域名：在 domains 数组里追加对象即可；保存后下一轮自动生效，也可 POST /refresh 立即重跑。本文件是 JSON，不支持注释；字段说明见 deploy/config-schema/README.md。",
+  "_readme": "手动新增域名：在 domains 数组中追加对象即可；保存后下一轮自动生成，也可 POST /refresh 即时刷新。本文件为 JSON，不支持注释，字段说明见 deploy/config-schema/README.md",
   "domains": [
     { "name": "github.com" },
     {
       "name": "raw.githubusercontent.com",
       "sni": "raw.githubusercontent.com",
       "port": 443
+    },
+    {
+      "name": "gitlab.com",
+      "expand": true,
+      "expand_sources": ["wordlist", "rules"]
+    },
+    {
+      "name": "cloudflare.com",
+      "expand": true,
+      "expand_sources": ["ct", "wordlist", "rules"]
     }
   ],
   "defaults": {
@@ -18,6 +28,10 @@
     "max_candidates": 64,
     "tcp_rounds": 3,
     "timeout_seconds": 3,
-    "outputs": ["hosts.txt", "agh.txt", "status.json"]
+    "outputs": ["hosts.txt", "agh.txt", "status.json"],
+    "expand_concurrency": 10,
+    "expand_timeout_seconds": 10,
+    "expand_max_subdomains": 50,
+    "expand_sources": ["wordlist", "rules"]
   }
 }

@@ -284,3 +284,12 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 ## 许可
 
 仓库尚未声明 LICENSE。如需公开分发或他人复用，请先补充许可证文件。
+
+## 贡献指南
+
+详见 [`CONTRIBUTING.md`](CONTRIBUTING.md)，包含：
+ - Git 提交规范（中文标签、说明、注释）
+ - 合并策略（Squash and merge）
+ - 开发环境与本地验收清单
+ - FPK 打包验证
+ - 关键设计约束

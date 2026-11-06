@@ -20,28 +20,34 @@ type Config struct {
 
 // Domain 描述一个待优选的域名。
 type Domain struct {
-	Name         string   `json:"name"`
-	SNI          string   `json:"sni"`
-	Port         int      `json:"port"`
-	Candidates   []string `json:"candidates"`
-	ExpectStatus []int    `json:"expect_status"`
-	SuppressAAAA *bool    `json:"suppress_aaaa"`
-	AllowPrivate bool     `json:"allow_private"`
+	Name           string   `json:"name"`
+	SNI            string   `json:"sni"`
+	Port           int      `json:"port"`
+	Candidates     []string `json:"candidates"`
+	ExpectStatus   []int    `json:"expect_status"`
+	SuppressAAAA   *bool    `json:"suppress_aaaa"`
+	AllowPrivate   bool     `json:"allow_private"`
+	Expand         bool     `json:"expand"`
+	ExpandSources  []string `json:"expand_sources"`
 }
 
 // Defaults 是全局默认值，可被单个域名覆盖。
 type Defaults struct {
-	ScheduleMinutes   int      `json:"schedule_minutes"`
-	ProbeDNS          []string `json:"probe_dns"`
-	ProbePort         int      `json:"probe_port"`
-	Concurrency       int      `json:"concurrency"`
-	HysteresisPercent int      `json:"hysteresis_percent"`
-	HysteresisRounds  int      `json:"hysteresis_rounds"`
-	ExpectStatus      []int    `json:"expect_status"`
-	Outputs           []string `json:"outputs"`
-	MaxCandidates     int      `json:"max_candidates"`
-	TCPRounds         int      `json:"tcp_rounds"`
-	TimeoutSeconds    int      `json:"timeout_seconds"`
+	ScheduleMinutes     int      `json:"schedule_minutes"`
+	ProbeDNS            []string `json:"probe_dns"`
+	ProbePort           int      `json:"probe_port"`
+	Concurrency         int      `json:"concurrency"`
+	HysteresisPercent   int      `json:"hysteresis_percent"`
+	HysteresisRounds    int      `json:"hysteresis_rounds"`
+	ExpectStatus        []int    `json:"expect_status"`
+	Outputs             []string `json:"outputs"`
+	MaxCandidates       int      `json:"max_candidates"`
+	TCPRounds           int      `json:"tcp_rounds"`
+	TimeoutSeconds      int      `json:"timeout_seconds"`
+	ExpandConcurrency     int      `json:"expand_concurrency"`
+	ExpandTimeoutSeconds  int      `json:"expand_timeout_seconds"`
+	ExpandMaxSubdomains   int      `json:"expand_max_subdomains"`
+	ExpandSources         []string `json:"expand_sources"`
 }
 
 // Runtime 是一轮探测所需的全部运行时信息。
@@ -57,13 +63,18 @@ type Runtime struct {
 
 // Target 是把 Domain 与 Defaults 合并后的最终参数。
 type Target struct {
-	Name         string
-	SNI          string
-	Port         int
-	Candidates   []string
-	ExpectStatus []int
-	SuppressAAAA bool
-	AllowPrivate bool
+	Name              string
+	SNI               string
+	Port              int
+	Candidates        []string
+	ExpectStatus      []int
+	SuppressAAAA      bool
+	AllowPrivate      bool
+	Expand             bool
+	ExpandSources      []string
+	ExpandConcurrency  int
+	ExpandTimeout      int
+	ExpandMaxSubdomains int
 }
 
 func envOr(key, def string) string {
@@ -84,6 +95,19 @@ func envInt(key string, dst *int) error {
 	}
 	*dst = n
 	return nil
+}
+
+
+// Parse 解析并验证配置 JSON，仅用于 API 校验。
+func Parse(data []byte) (Config, error) {
+	var c Config
+	if err := json.Unmarshal(data, &c); err != nil {
+		return Config{}, err
+	}
+	if err := validate(&c); err != nil {
+		return Config{}, err
+	}
+	return c, nil
 }
 
 // Load 每次调用都重新读取 domains.json，因此编辑域名清单后下一轮自动生效，无需重启。
@@ -148,6 +172,19 @@ func applyDefaults(c *Config) {
 	if len(d.Outputs) == 0 {
 		d.Outputs = []string{"hosts.txt", "agh.txt", "status.json"}
 	}
+	// 展开功能默认值
+	if d.ExpandConcurrency <= 0 {
+		d.ExpandConcurrency = 10
+	}
+	if d.ExpandTimeoutSeconds <= 0 {
+		d.ExpandTimeoutSeconds = 10
+	}
+	if d.ExpandMaxSubdomains <= 0 {
+		d.ExpandMaxSubdomains = 50
+	}
+	if len(d.ExpandSources) == 0 {
+		d.ExpandSources = []string{"wordlist", "rules"}
+	}
 }
 
 func applyEnv(c *Config) error {
@@ -197,6 +234,22 @@ func validate(c *Config) error {
 	if d.TimeoutSeconds < 1 || d.TimeoutSeconds > 60 {
 		return fmt.Errorf("timeout_seconds 必须在 1..60，当前 %d", d.TimeoutSeconds)
 	}
+	// 验证展开相关配置
+	if d.ExpandConcurrency < 1 || d.ExpandConcurrency > 256 {
+		return fmt.Errorf("expand_concurrency 必须在 1..256，当前 %d", d.ExpandConcurrency)
+	}
+	if d.ExpandTimeoutSeconds < 1 || d.ExpandTimeoutSeconds > 60 {
+		return fmt.Errorf("expand_timeout_seconds 必须在 1..60，当前 %d", d.ExpandTimeoutSeconds)
+	}
+	if d.ExpandMaxSubdomains < 1 || d.ExpandMaxSubdomains > 1000 {
+		return fmt.Errorf("expand_max_subdomains 必须在 1..1000，当前 %d", d.ExpandMaxSubdomains)
+	}
+	validSources := map[string]bool{"ct": true, "wordlist": true, "rules": true}
+	for _, s := range d.ExpandSources {
+		if !validSources[s] {
+			return fmt.Errorf("expand_sources 含非法值 %q，合法值: ct/wordlist/rules", s)
+		}
+	}
 	for _, s := range d.ProbeDNS {
 		// 必须是字面 IP：若写主机名，解析它又会走系统 DNS，形成循环依赖。
 		if net.ParseIP(s) == nil {
@@ -221,6 +274,16 @@ func validate(c *Config) error {
 				return fmt.Errorf("%s 的 candidates 含非法 IP: %q", name, ip)
 			}
 		}
+		// 验证域名级展开配置
+		if dom.Expand {
+			if len(dom.ExpandSources) > 0 {
+				for _, s := range dom.ExpandSources {
+					if !validSources[s] {
+						return fmt.Errorf("%s 的 expand_sources 含非法值 %q，合法值: ct/wordlist/rules", name, s)
+					}
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -228,13 +291,18 @@ func validate(c *Config) error {
 // Resolve 合并单个域名与全局默认值。
 func (c *Config) Resolve(d Domain) Target {
 	t := Target{
-		Name:         strings.TrimSpace(d.Name),
-		Candidates:   append([]string(nil), d.Candidates...),
-		AllowPrivate: d.AllowPrivate,
-		SuppressAAAA: true,
-		ExpectStatus: append([]int(nil), c.Defaults.ExpectStatus...),
-		Port:         c.Defaults.ProbePort,
-		SNI:          strings.TrimSpace(d.SNI),
+		Name:               strings.TrimSpace(d.Name),
+		Candidates:         append([]string(nil), d.Candidates...),
+		AllowPrivate:       d.AllowPrivate,
+		SuppressAAAA:       true,
+		ExpectStatus:       append([]int(nil), c.Defaults.ExpectStatus...),
+		Port:               c.Defaults.ProbePort,
+		SNI:                strings.TrimSpace(d.SNI),
+		Expand:             d.Expand,
+		ExpandSources:      d.ExpandSources,
+		ExpandConcurrency:  c.Defaults.ExpandConcurrency,
+		ExpandTimeout:      c.Defaults.ExpandTimeoutSeconds,
+		ExpandMaxSubdomains: c.Defaults.ExpandMaxSubdomains,
 	}
 	if t.SNI == "" {
 		t.SNI = t.Name
@@ -247,6 +315,12 @@ func (c *Config) Resolve(d Domain) Target {
 	}
 	if d.SuppressAAAA != nil {
 		t.SuppressAAAA = *d.SuppressAAAA
+	}
+	// 域名级展开配置覆盖全局默认
+	if d.Expand {
+		if len(d.ExpandSources) > 0 {
+			t.ExpandSources = append([]string(nil), d.ExpandSources...)
+		}
 	}
 	return t
 }

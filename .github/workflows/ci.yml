@@ -1,0 +1,180 @@
+﻿name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  GO_VERSION: "1.23.4"
+  GOPROXY: "off"
+  GOSUMDB: "off"
+  CGO_ENABLED: "0"
+
+jobs:
+  test:
+    name: Test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Verify go.mod
+        run: |
+          cd core
+          cat go.mod
+
+      - name: Download dependencies (offline check)
+        run: |
+          cd core
+          go mod download 2>&1 || true
+          # GOPROXY=off 且无第三方依赖，应直接通过
+
+      - name: Run go vet
+        run: |
+          cd core
+          GOPROXY=off GOSUMDB=off CGO_ENABLED=0 go vet ./...
+
+      - name: Run tests
+        run: |
+          cd core
+          GOPROXY=off GOSUMDB=off CGO_ENABLED=0 go test ./... -v
+
+  build-cross:
+    name: Cross-compile (amd64, arm64)
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
+        include:
+          - goarch: amd64
+            platform: x86
+          - goarch: arm64
+            platform: arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Build static binary
+        run: |
+          cd core
+          GOOS=linux GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 GOPROXY=off GOSUMDB=off \
+            go build -trimpath -ldflags="-s -w" -o hosts-optimizer-${{ matrix.platform }} ./cmd/hosts-optimizer
+          file hosts-optimizer-${{ matrix.platform }}
+
+      - name: Verify static binary
+        run: |
+          ldd hosts-optimizer-${{ matrix.platform }} 2>&1 | grep -q "not a dynamic executable" && echo "✅ 纯静态链接" || (echo "❌ 非静态链接" && exit 1)
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hosts-optimizer-${{ matrix.platform }}
+          path: core/hosts-optimizer-${{ matrix.platform }}
+          retention-days: 7
+
+  build-fpk-skip:
+    name: Build FPK (SKIP_PACK=1)
+    runs-on: ubuntu-latest
+    needs: build-cross
+    strategy:
+      matrix:
+        platform: [x86, arm]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download built binary
+        uses: actions/download-artifact@v4
+        with:
+          name: hosts-optimizer-${{ matrix.platform }}
+          path: core/app/bin
+
+      - name: Prepare staging
+        run: |
+          mkdir -p core/app/bin
+          mv core/app/bin/hosts-optimizer-${{ matrix.platform }} core/app/bin/hosts-optimizer
+          chmod +x core/app/bin/hosts-optimizer
+
+      - name: Build FPK (skip fnpack)
+        run: |
+          SKIP_PACK=1 FNPACK=/usr/local/bin/fnpack ./deploy/scripts/build-native-fpk.sh ${{ matrix.platform }}
+        working-directory: ${{ github.workspace }}
+        env:
+          FNPACK: /usr/local/bin/fnpack
+
+      - name: Verify staging
+        run: |
+          ls -la core/app/bin/hosts-optimizer
+          file core/app/bin/hosts-optimizer
+
+  check-config-schema:
+    name: Validate domains.json schema
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Test config parsing
+        run: |
+          cd core
+          GOPROXY=off GOSUMDB=off CGO_ENABLED=0 go run ./cmd/hosts-optimizer -check-config
+        env:
+          HO_CONFIG: ${{ github.workspace }}/deploy/config-schema
+          HO_OUTPUT: /tmp/ho-out
+          HO_STATE: /tmp/ho-state
+          HO_PORT: 18088
+
+  check-line-endings:
+    name: Check Line Endings (LF)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 关键：不自动转换行尾，保持原样检查
+          # 但 GitHub Actions 默认会按 .gitattributes 处理
+          # 这里用 raw 检查
+
+      - name: Check CRLF in shell/scripts
+        run: |
+          # 检查 .sh、cmd/* 必须是 LF
+          find . -type f \( -name "*.sh" -o -path "./deploy/fnos-native-fpk/cmd/*" \) ! -name "*.fpk" ! -name "*.png" | while read f; do
+            if grep -q $'"\r"' "$f"; then
+              echo "❌ CRLF found: $f"
+              exit 1
+            fi
+          done
+          echo "✅ 所有脚本文件均为 LF"
+
+      - name: Check binary files not treated as text
+        run: |
+          # .png .fpk 应为 binary
+          find . -type f \( -name "*.png" -o -name "*.fpk" \) | while read f; do
+            if file "$f" | grep -q "text"; then
+              echo "❌ 二进制文件被当作文本: $f"
+              exit 1
+            fi
+          done
+          echo "✅ 二进制文件标记正确"
+
