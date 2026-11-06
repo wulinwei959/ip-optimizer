@@ -31,7 +31,7 @@
 | 字段 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `schedule_minutes` | int | 60 | 轮询间隔，不依赖系统 crontab，1..1440 |
-| `probe_dns` | string[] | 223.5.5.5 / 119.29.29.29 | **必须为字面 IP**，强烈建议核心机开启 AdGuard Home |
+| `probe_dns` | string[] | 223.5.5.5 / 119.29.29.29 | 上游列表，可混用 UDP（**字面 IP**）、DoT（`tls://主机[:853]`）、DoH（`https://主机/路径`）；需绕开本机 AdGuard Home；不支持 DoQ |
 | `probe_port` | int | 443 | 默认验证端口 |
 | `concurrency` | int | 20 | 并发验证数 (1..256)，过高易被运营商网络拦截 |
 | `hysteresis_percent` | int | 20 | 新 IP 需比当前优至少该百分比 |

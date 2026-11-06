@@ -2,9 +2,20 @@ package dnsquery
 
 import (
 	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
+	"io"
+	"math/big"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func u16(b *bytes.Buffer, v uint16) {
@@ -32,9 +43,59 @@ func TestBuildQuery(t *testing.T) {
 	}
 }
 
+func TestParseServer(t *testing.T) {
+	cases := []struct {
+		in      string
+		kind    string
+		addr    string
+		dohURL  string
+		wantErr bool
+	}{
+		{"223.5.5.5", "udp", "223.5.5.5:53", "", false},
+		{"223.5.5.5:5353", "udp", "223.5.5.5:5353", "", false},
+		{"udp://1.1.1.1", "udp", "1.1.1.1:53", "", false},
+		{"2001:4860:4860::8888", "udp", "[2001:4860:4860::8888]:53", "", false},
+		{"tls://dns.alidns.com", "dot", "dns.alidns.com:853", "", false},
+		{"dot://1.1.1.1:853", "dot", "1.1.1.1:853", "", false},
+		{"https://dns.cloudflare.com/dns-query", "doh", "", "https://dns.cloudflare.com/dns-query", false},
+		{"https://dns.alidns.com", "doh", "", "https://dns.alidns.com/dns-query", false},
+		{"quic://dns.adguard-dns.com", "", "", "", true},
+		{"doq://dns.adguard-dns.com", "", "", "", true},
+		{"http://dns.alidns.com/dns-query", "", "", "", true},
+		{"", "", "", "", true},
+		{"dns.alidns.com", "", "", "", true},
+	}
+	for _, c := range cases {
+		up, err := parseServer(c.in)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("parseServer(%q) 应报错，实际得到 %+v", c.in, up)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("parseServer(%q) 报错: %v", c.in, err)
+			continue
+		}
+		if up.kind != c.kind {
+			t.Errorf("parseServer(%q).kind = %q, want %q", c.in, up.kind, c.kind)
+		}
+		if up.kind != "doh" && up.addr != c.addr {
+			t.Errorf("parseServer(%q).addr = %q, want %q", c.in, up.addr, c.addr)
+		}
+		if up.kind == "doh" && up.url != c.dohURL {
+			t.Errorf("parseServer(%q).url = %q, want %q", c.in, up.url, c.dohURL)
+		}
+	}
+}
+
 // 构造一个带 0xC0 压缩指针的真实 A 应答。
 func responseWithPointer(t *testing.T, id uint16) []byte {
 	t.Helper()
+	return buildAResponse(id)
+}
+
+func buildAResponse(id uint16) []byte {
 	var b bytes.Buffer
 	u16(&b, id)
 	u16(&b, 0x8180) // QR + RD + RA, rcode=0
@@ -47,6 +108,124 @@ func responseWithPointer(t *testing.T, id uint16) []byte {
 	b.Write([]byte{0, 1, 0, 1, 0, 0, 0, 60, 0, 4}) // TYPE=A CLASS=IN TTL=60 RDLENGTH=4
 	b.Write([]byte{93, 184, 216, 34})              // 93.184.216.34
 	return b.Bytes()
+}
+
+func TestCollectDoH(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.Header.Get("Content-Type") != "application/dns-message" {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		if len(body) < 12 {
+			http.Error(w, "bad query", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/dns-message")
+		_, _ = w.Write(buildAResponse(binary.BigEndian.Uint16(body[:2])))
+	}))
+	defer srv.Close()
+
+	roots := x509.NewCertPool()
+	roots.AddCert(srv.Certificate())
+	ips, err := CollectWithOptions(context.Background(), "www.example.com", []string{srv.URL + "/dns-query"}, Options{
+		Timeout: 3 * time.Second, RootCAs: roots,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ips) != 1 || ips[0] != "93.184.216.34" {
+		t.Fatalf("DoH 结果 = %v, want [93.184.216.34]", ips)
+	}
+}
+
+func makeTestCert(t *testing.T) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+		DNSNames:              []string{"dns.test"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}
+
+func startDoTServer(t *testing.T) (string, *x509.CertPool) {
+	t.Helper()
+	cert := makeTestCert(t)
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	parsed, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(parsed)
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				var lenBuf [2]byte
+				if _, err := io.ReadFull(c, lenBuf[:]); err != nil {
+					return
+				}
+				query := make([]byte, int(binary.BigEndian.Uint16(lenBuf[:])))
+				if _, err := io.ReadFull(c, query); err != nil || len(query) < 12 {
+					return
+				}
+				resp := buildAResponse(binary.BigEndian.Uint16(query[:2]))
+				frame := make([]byte, 2+len(resp))
+				binary.BigEndian.PutUint16(frame[:2], uint16(len(resp)))
+				copy(frame[2:], resp)
+				_, _ = c.Write(frame)
+			}(conn)
+		}
+	}()
+	return ln.Addr().String(), roots
+}
+
+func TestCollectDoT(t *testing.T) {
+	addr, roots := startDoTServer(t)
+	ips, err := CollectWithOptions(context.Background(), "www.example.com", []string{"tls://" + addr}, Options{
+		Timeout: 3 * time.Second, RootCAs: roots,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ips) != 1 || ips[0] != "93.184.216.34" {
+		t.Fatalf("DoT 结果 = %v, want [93.184.216.34]", ips)
+	}
+}
+
+func TestValidateServerRejectsDoQ(t *testing.T) {
+	if err := ValidateServer("quic://dns.adguard-dns.com"); err == nil {
+		t.Fatal("DoQ 应返回不支持错误")
+	}
+	if err := ValidateServer("tls://dns.alidns.com"); err != nil {
+		t.Fatalf("DoT 地址应通过校验: %v", err)
+	}
 }
 
 func TestParseAResponseWithCompressionPointer(t *testing.T) {

@@ -34,7 +34,7 @@ AdGuard Home 订阅
 
 两条防循环依赖的硬约束：
 
-- `probe_dns` 必须是**字面 IP**（配置校验会拒绝主机名），且必须绕开本机 AdGuard Home —— 否则「用待优化的解析结果去找候选 IP」形成循环依赖。
+- `probe_dns` 支持明文 UDP（必须是字面 IP）、DoT（`tls://主机[:853]`）与 DoH（`https://主机/路径`），可混用；所有上游都必须绕开本机 AdGuard Home —— 否则「用待优化的解析结果去找候选 IP」形成循环依赖。DoQ 需要第三方 QUIC 库，本项目坚持零依赖，因此不支持。
 - 订阅地址用 NAS **内网 IP**，不要填公网域名。
 
 核心用 **Go 标准库、零第三方依赖**（`go.mod` 仅 `module hosts-optimizer` + `go 1.21`），`CGO_ENABLED=0` 交叉编译成单个静态 ELF。构建脚本强制 `GOPROXY=off`：一旦误引入第三方依赖会直接构建失败，而不是偷偷联网。
@@ -51,6 +51,7 @@ AdGuard Home 订阅
 - **域名发现**：在「编辑域名清单」输入主域名（如 `github.com`），自动从 CT 日志、字典与规则中发现相关子域名；下拉列表逐项勾选，点「添加」即可写入配置，无需手工抄写。
 - **按主域名分组**：状态表按可注册主域名归类（如 `api.gitlab.com` 归入 `gitlab.com`），点分组标题展开该分类的全部域名；支持整组勾选、全部展开/收起，搜索时自动展开命中分组。
 - **图形化配置**：轮询周期、探测 DNS、并发、超时、滞回、子域名展开等参数与域名列表均可在表单内直接填写，保存后自动写回 `domains.json` 并触发新一轮；需要精细控制时可切到 JSON 源码模式。
+- **加密 DNS 上游**：`probe_dns` 支持 UDP、DoT、DoH 混用，例如 `tls://dns.alidns.com`、`https://dns.cloudflare.com/dns-query`；DoQ 需第三方 QUIC 库，未引入。
 - **异步刷新**：`POST /refresh` 立即返回 `task_id` 并在后台执行，页面轮询 `/api/refresh-status` 显示进度，长时间探测不再阻塞请求。
 - **fnOS 桌面入口**：桌面图标以 iframe 窗口打开状态页，可查看生效 IP / 延迟、一键复制订阅地址、点「立即刷新」触发新一轮；表格支持勾选与批量删除。
 
@@ -256,6 +257,7 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 - **真机 1.0.1**：`app stop` / `app start` / `app restart` 均返回成功，应用中心状态与真实进程一致；卸载重装后 `domains.json`、`output/`、`state/` 保留；`/`、`/status.json`、`/hosts.txt`、`/agh.txt` 均返回 200，`ETag` → 304；`10350` 已修复。
 - **真机 1.0.2**：卸载重装后配置与产物保留，页面显示 18 个域名、17 个生效；`/`、`/status.json`、`/hosts.txt`、`/agh.txt` 均 200，`ETag` → 304；`POST /refresh` 返回 `202` + `task_id`，约 93 秒后轮询到 `state=done`（旧同步接口会超时），期间页面不阻塞；`/api/expand` 对 `github.com` 返回 50 个相关域名（12 个可解析），下拉勾选与「添加」写入配置正常；`app stop` / `app start` 均成功。
 - **真机 1.0.3**：卸载重装后配置与产物保留；状态表按主域名分组（如 `cloudflare.com` 7 个、`github.com`、`githubusercontent.com` 等），分组展开/收起与整组勾选正常；图形化表单正确带出轮询周期 60、端口 443、并发 20、候选 64、TCP 3 轮、超时 3 秒等参数，域名列表可编辑。
+- **真机 1.0.4**：把 `probe_dns` 临时改为 `https://dns.alidns.com/dns-query` + `tls://dns.alidns.com`，一轮约 75 秒完成，17/18 域名生效且候选数正常，验证后已恢复原配置；`quic://` 地址被配置校验拒绝并返回明确提示。
 
 **待验证 / 已知限制**
 

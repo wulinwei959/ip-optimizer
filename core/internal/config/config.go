@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"hosts-optimizer/internal/dnsquery"
 )
 
 // Config 是 domains.json 的完整结构。
@@ -20,34 +22,34 @@ type Config struct {
 
 // Domain 描述一个待优选的域名。
 type Domain struct {
-	Name           string   `json:"name"`
-	SNI            string   `json:"sni"`
-	Port           int      `json:"port"`
-	Candidates     []string `json:"candidates"`
-	ExpectStatus   []int    `json:"expect_status"`
-	SuppressAAAA   *bool    `json:"suppress_aaaa"`
-	AllowPrivate   bool     `json:"allow_private"`
-	Expand         bool     `json:"expand"`
-	ExpandSources  []string `json:"expand_sources"`
+	Name          string   `json:"name"`
+	SNI           string   `json:"sni"`
+	Port          int      `json:"port"`
+	Candidates    []string `json:"candidates"`
+	ExpectStatus  []int    `json:"expect_status"`
+	SuppressAAAA  *bool    `json:"suppress_aaaa"`
+	AllowPrivate  bool     `json:"allow_private"`
+	Expand        bool     `json:"expand"`
+	ExpandSources []string `json:"expand_sources"`
 }
 
 // Defaults 是全局默认值，可被单个域名覆盖。
 type Defaults struct {
-	ScheduleMinutes     int      `json:"schedule_minutes"`
-	ProbeDNS            []string `json:"probe_dns"`
-	ProbePort           int      `json:"probe_port"`
-	Concurrency         int      `json:"concurrency"`
-	HysteresisPercent   int      `json:"hysteresis_percent"`
-	HysteresisRounds    int      `json:"hysteresis_rounds"`
-	ExpectStatus        []int    `json:"expect_status"`
-	Outputs             []string `json:"outputs"`
-	MaxCandidates       int      `json:"max_candidates"`
-	TCPRounds           int      `json:"tcp_rounds"`
-	TimeoutSeconds      int      `json:"timeout_seconds"`
-	ExpandConcurrency     int      `json:"expand_concurrency"`
-	ExpandTimeoutSeconds  int      `json:"expand_timeout_seconds"`
-	ExpandMaxSubdomains   int      `json:"expand_max_subdomains"`
-	ExpandSources         []string `json:"expand_sources"`
+	ScheduleMinutes      int      `json:"schedule_minutes"`
+	ProbeDNS             []string `json:"probe_dns"`
+	ProbePort            int      `json:"probe_port"`
+	Concurrency          int      `json:"concurrency"`
+	HysteresisPercent    int      `json:"hysteresis_percent"`
+	HysteresisRounds     int      `json:"hysteresis_rounds"`
+	ExpectStatus         []int    `json:"expect_status"`
+	Outputs              []string `json:"outputs"`
+	MaxCandidates        int      `json:"max_candidates"`
+	TCPRounds            int      `json:"tcp_rounds"`
+	TimeoutSeconds       int      `json:"timeout_seconds"`
+	ExpandConcurrency    int      `json:"expand_concurrency"`
+	ExpandTimeoutSeconds int      `json:"expand_timeout_seconds"`
+	ExpandMaxSubdomains  int      `json:"expand_max_subdomains"`
+	ExpandSources        []string `json:"expand_sources"`
 }
 
 // Runtime 是一轮探测所需的全部运行时信息。
@@ -63,17 +65,17 @@ type Runtime struct {
 
 // Target 是把 Domain 与 Defaults 合并后的最终参数。
 type Target struct {
-	Name              string
-	SNI               string
-	Port              int
-	Candidates        []string
-	ExpectStatus      []int
-	SuppressAAAA      bool
-	AllowPrivate      bool
-	Expand             bool
-	ExpandSources      []string
-	ExpandConcurrency  int
-	ExpandTimeout      int
+	Name                string
+	SNI                 string
+	Port                int
+	Candidates          []string
+	ExpectStatus        []int
+	SuppressAAAA        bool
+	AllowPrivate        bool
+	Expand              bool
+	ExpandSources       []string
+	ExpandConcurrency   int
+	ExpandTimeout       int
 	ExpandMaxSubdomains int
 }
 
@@ -96,7 +98,6 @@ func envInt(key string, dst *int) error {
 	*dst = n
 	return nil
 }
-
 
 // Parse 解析并验证配置 JSON，仅用于 API 校验。
 func Parse(data []byte) (Config, error) {
@@ -251,9 +252,9 @@ func validate(c *Config) error {
 		}
 	}
 	for _, s := range d.ProbeDNS {
-		// 必须是字面 IP：若写主机名，解析它又会走系统 DNS，形成循环依赖。
-		if net.ParseIP(s) == nil {
-			return fmt.Errorf("probe_dns 必须是字面 IP 地址，收到 %q", s)
+		// UDP 上游必须是字面 IP；DoT/DoH 允许主机名（由 TLS/HTTPS 校验证书）。
+		if err := dnsquery.ValidateServer(s); err != nil {
+			return fmt.Errorf("probe_dns 地址 %q 非法: %w", s, err)
 		}
 	}
 	seen := make(map[string]bool)
@@ -291,17 +292,17 @@ func validate(c *Config) error {
 // Resolve 合并单个域名与全局默认值。
 func (c *Config) Resolve(d Domain) Target {
 	t := Target{
-		Name:               strings.TrimSpace(d.Name),
-		Candidates:         append([]string(nil), d.Candidates...),
-		AllowPrivate:       d.AllowPrivate,
-		SuppressAAAA:       true,
-		ExpectStatus:       append([]int(nil), c.Defaults.ExpectStatus...),
-		Port:               c.Defaults.ProbePort,
-		SNI:                strings.TrimSpace(d.SNI),
-		Expand:             d.Expand,
-		ExpandSources:      d.ExpandSources,
-		ExpandConcurrency:  c.Defaults.ExpandConcurrency,
-		ExpandTimeout:      c.Defaults.ExpandTimeoutSeconds,
+		Name:                strings.TrimSpace(d.Name),
+		Candidates:          append([]string(nil), d.Candidates...),
+		AllowPrivate:        d.AllowPrivate,
+		SuppressAAAA:        true,
+		ExpectStatus:        append([]int(nil), c.Defaults.ExpectStatus...),
+		Port:                c.Defaults.ProbePort,
+		SNI:                 strings.TrimSpace(d.SNI),
+		Expand:              d.Expand,
+		ExpandSources:       d.ExpandSources,
+		ExpandConcurrency:   c.Defaults.ExpandConcurrency,
+		ExpandTimeout:       c.Defaults.ExpandTimeoutSeconds,
 		ExpandMaxSubdomains: c.Defaults.ExpandMaxSubdomains,
 	}
 	if t.SNI == "" {

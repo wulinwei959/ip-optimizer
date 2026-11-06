@@ -16,7 +16,7 @@ import (
 	"hosts-optimizer/internal/config"
 )
 
-const version = "1.0.3"
+const version = "1.0.4"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)

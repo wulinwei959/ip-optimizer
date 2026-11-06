@@ -236,7 +236,9 @@ func (a *App) doRound(ctx context.Context) (int, error) {
 		if len(t.Candidates) > 0 {
 			ips = t.Candidates
 		} else {
-			ips, err = dnsquery.Collect(ctx, t.Name, d.ProbeDNS, timeout, t.AllowPrivate, d.MaxCandidates)
+			ips, err = dnsquery.CollectWithOptions(ctx, t.Name, d.ProbeDNS, dnsquery.Options{
+				Timeout: timeout, AllowPrivate: t.AllowPrivate, Limit: d.MaxCandidates, RootCAs: a.rootCAs,
+			})
 			if err != nil {
 				log.Printf("[%s] DNS 采集失败: %v", t.Name, err)
 			}
@@ -811,10 +813,11 @@ tr.domain-row td:nth-child(2){padding-left:32px}
   <fieldset class="cfg-section">
     <legend>DNS 与切换策略</legend>
     <div class="field-grid">
-      <label class="wide">探测 DNS（逗号分隔）<input id="fProbeDNS" type="text" placeholder="223.5.5.5, 119.29.29.29"></label>
+      <label class="wide">探测 DNS（逗号分隔）<input id="fProbeDNS" type="text" placeholder="223.5.5.5, tls://dns.alidns.com, https://dns.cloudflare.com/dns-query"></label>
       <label>滞回百分比（%）<input id="fHystPct" type="number" min="0"></label>
       <label>滞回轮数<input id="fHystRounds" type="number" min="1"></label>
     </div>
+    <p class="hint" style="margin:8px 0 0">支持 UDP（字面 IP）、DoT（tls://主机[:853]）、DoH（https://主机/路径），可混用；DoQ 暂不支持。</p>
   </fieldset>
   <fieldset class="cfg-section">
     <legend>子域名展开</legend>
