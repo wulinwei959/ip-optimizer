@@ -1,4 +1,4 @@
-﻿name: CI
+name: CI
 
 on:
   push:
@@ -112,10 +112,8 @@ jobs:
 
       - name: Build FPK (skip fnpack)
         run: |
-          SKIP_PACK=1 FNPACK=/usr/local/bin/fnpack ./deploy/scripts/build-native-fpk.sh ${{ matrix.platform }}
+          SKIP_PACK=1 ./deploy/scripts/build-native-fpk.sh ${{ matrix.platform }}
         working-directory: ${{ github.workspace }}
-        env:
-          FNPACK: /usr/local/bin/fnpack
 
       - name: Verify staging
         run: |
@@ -160,7 +158,7 @@ jobs:
         run: |
           # 检查 .sh、cmd/* 必须是 LF
           find . -type f \( -name "*.sh" -o -path "./deploy/fnos-native-fpk/cmd/*" \) ! -name "*.fpk" ! -name "*.png" | while read f; do
-            if grep -q $'"\r"' "$f"; then
+            if grep -q $'\r' "$f"; then
               echo "❌ CRLF found: $f"
               exit 1
             fi
@@ -177,4 +175,3 @@ jobs:
             fi
           done
           echo "✅ 二进制文件标记正确"
-
