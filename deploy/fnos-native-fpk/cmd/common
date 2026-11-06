@@ -42,23 +42,45 @@ start_daemon() {
   return 1
 }
 
-# Stop the daemon by PID, with a graceful-then-force sequence, plus a name-based
-# safety net in case the process was orphaned.
+# 先礼后兵地终止一个 PID：最多等待 6 秒，仍未退出才强杀。
+terminate_pid() {
+  local pid="$1"
+  [ -n "$pid" ] || return 0
+  kill "$pid" 2>/dev/null || true
+  local i
+  for i in 1 2 3 4 5 6; do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 1
+  done
+  kill -9 "$pid" 2>/dev/null || true
+}
+
+# 停止守护进程。
+#
+# 注意：这里禁止使用 `pkill -f "hosts-optimizer"`。本脚本自身位于
+# /var/apps/hosts-optimizer-native/cmd/main，命令行里同样包含应用名，
+# 模糊匹配会把正在执行 stop 的脚本一起杀掉，应用中心因此收到非零退出码
+# 并报错 10350（但进程其实已经停止，形成“停了却报失败”的假故障）。
+# 兜底清理必须按进程名精确匹配，只命中真正的二进制。
 stop_daemon() {
   if [ -f "$PID_FILE" ]; then
     local pid
     pid=$(cat "$PID_FILE" 2>/dev/null)
-    if [ -n "$pid" ]; then
-      kill "$pid" 2>/dev/null || true
-      local i
-      for i in 1 2 3 4 5 6; do
-        kill -0 "$pid" 2>/dev/null || break
-        sleep 1
-      done
-      kill -9 "$pid" 2>/dev/null || true
-    fi
+    terminate_pid "$pid"
     rm -f "$PID_FILE"
   fi
-  pkill -f "hosts-optimizer" 2>/dev/null || true
+
+  local pids=""
+  if command -v pidof >/dev/null 2>&1; then
+    pids=$(pidof hosts-optimizer 2>/dev/null || true)
+  elif command -v pgrep >/dev/null 2>&1; then
+    pids=$(pgrep -x hosts-optimizer 2>/dev/null || true)
+  fi
+  local pid
+  for pid in $pids; do
+    [ "$pid" = "$$" ] && continue
+    terminate_pid "$pid"
+  done
+  rm -f "$PID_FILE"
   return 0
 }
