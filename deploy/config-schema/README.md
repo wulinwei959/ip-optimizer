@@ -55,7 +55,8 @@
 | `/hosts.txt` | `IP domain` 逐行，供 AdGuard Home、DNS 重写清单、/etc/hosts 订阅 |
 | `/agh.txt` | `\|\|domain^$dnsrewrite=NOERROR;A;IP`，**推荐**：自动子域名且 AAAA 自动 NODATA |
 | `/status.json` | 每个域名的选中 IP、通过数、生成 IP、换代原因、本轮时间 |
-| `POST /refresh` | 即时刷新一轮 |
+| `POST /refresh` | 提交后台刷新任务，立即返回 `202` + `task_id` |
+| `GET /api/refresh-status?task_id=...` | 查询刷新进度：`running` / `done` / `error` |
 | `GET /api/domains` | 读取 domains.json 原文 |
 | `PUT/POST /api/domains` | 写入 domains.json（校验后原子写入） |
 | `POST /api/expand` | 域名展开：`{ "domain": "github.com", "sources": ["wordlist", "rules"] }` |
@@ -74,7 +75,7 @@
 
 1. **SSH 编辑**（目前最稳）：`/var/apps/hosts-optimizer-native/etc/domains.json`，保存后 `POST /refresh` 即时生效
 2. **共享目录**：在 `config/resource` 加 `data-share`，让用户在群晖文件管理器中编辑；需验证 `TRIM_DATA_SHARE_PATHS` 挂载目录，目前未启用
-3. **Web 编辑页面**：两套方案，管理界面与订阅端点共用同一 HTTP 服务
+3. **Web 编辑页面**：管理界面与订阅端点共用同一 HTTP 服务；「编辑域名清单」内置域名发现工具，输入主域名后可勾选相关子域名批量添加，表格也支持勾选后批量删除
 
 ## 本地启动
 ```bash

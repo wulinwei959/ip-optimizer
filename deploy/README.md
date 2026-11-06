@@ -116,11 +116,13 @@ curl -X POST http://127.0.0.1:18088/refresh
 
 **1.0.1 真机验收**：修复 stop 脚本用 `pkill -f` 误杀自身导致的 `10350`；`app stop` / `app start` / `app restart` 均返回成功且应用中心状态与进程一致；卸载重装后 `domains.json`、`output/`、`state/` 保留；订阅端点 200、`ETag` 304 通过。
 
+**1.0.2 变更**：新增域名发现工具条（输入主域名 → 获取相关子域名 → 勾选 → 添加），表格支持全选与批量删除，页面视觉整体改版；`POST /refresh` 改为后台任务，返回 `202` + `task_id`，页面轮询 `/api/refresh-status` 展示进度。
+
 **仍需**：
 
 1. 确认桌面图标在真机显示（覆盖安装后可能要 `systemctl restart trim_app_center.service`）
 2. 在真实 AdGuard Home 实例中验证订阅解析与规则生效
 3. 用 `curl --resolve` 观察一周 IP 抖动与滞回表现
 4. 替换占位图标；用 `uname -m` 确认设备架构、选对安装包
-5. `POST /refresh` 当前同步执行，域名多时可能超过客户端超时；后续改为异步任务 + 状态轮询
+5. 刷新任务状态仅存于进程内存，服务重启后需要重新触发（产物不受影响）
 6. 若个别精简版 fnOS 上 `x509.SystemCertPool()` 读不到系统 CA，放一份 `deploy/ca-bundle.crt`，构建脚本会随包携带
