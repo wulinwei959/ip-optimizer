@@ -1,4 +1,4 @@
-﻿name: CI
+name: CI
 
 on:
   push:
@@ -23,7 +23,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: $$${{ env.GO_VERSION }}
+          go-version: ${{ env.GO_VERSION }}
           cache: false
 
       - name: Verify go.mod
@@ -35,7 +35,7 @@ jobs:
         run: |
           cd core
           go mod download 2>&1 || true
-          # GOPROXY=off 涓旀棤绗笁鏂逛緷璧栵紝搴旂洿鎺ラ€氳繃
+          # GOPROXY=off 且无第三方依赖，应直接通过
 
       - name: Run go vet
         run: |
@@ -66,25 +66,25 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: $$${{ env.GO_VERSION }}
+          go-version: ${{ env.GO_VERSION }}
           cache: false
 
       - name: Build static binary
         run: |
           cd core
-          GOOS=linux GOARCH=$$${{ matrix.goarch }} CGO_ENABLED=0 GOPROXY=off GOSUMDB=off \
-            go build -trimpath -ldflags="-s -w" -o hosts-optimizer-$$${{ matrix.platform }} ./cmd/hosts-optimizer
-          file hosts-optimizer-$$${{ matrix.platform }}
+          GOOS=linux GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 GOPROXY=off GOSUMDB=off \
+            go build -trimpath -ldflags="-s -w" -o hosts-optimizer-${{ matrix.platform }} ./cmd/hosts-optimizer
+          file hosts-optimizer-${{ matrix.platform }}
 
       - name: Verify static binary
         run: |
-          ldd hosts-optimizer-$$${{ matrix.platform }} 2>&1 | grep -q "not a dynamic executable" && echo "pure static" || (echo "not static" && exit 1)
+          ldd hosts-optimizer-${{ matrix.platform }} 2>&1 | grep -q "not a dynamic executable" && echo "pure static" || (echo "not static" && exit 1)
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: hosts-optimizer-$$${{ matrix.platform }}
-          path: core/hosts-optimizer-$$${{ matrix.platform }}
+          name: hosts-optimizer-${{ matrix.platform }}
+          path: core/hosts-optimizer-${{ matrix.platform }}
           retention-days: 7
 
   build-fpk-skip:
@@ -101,19 +101,19 @@ jobs:
       - name: Download built binary
         uses: actions/download-artifact@v4
         with:
-          name: hosts-optimizer-$$${{ matrix.platform }}
+          name: hosts-optimizer-${{ matrix.platform }}
           path: core/app/bin
 
       - name: Prepare staging
         run: |
           mkdir -p core/app/bin
-          mv core/app/bin/hosts-optimizer-$$${{ matrix.platform }} core/app/bin/hosts-optimizer
+          mv core/app/bin/hosts-optimizer-${{ matrix.platform }} core/app/bin/hosts-optimizer
           chmod +x core/app/bin/hosts-optimizer
 
       - name: Build FPK (skip fnpack)
         run: |
-          SKIP_PACK=1 ./deploy/scripts/build-native-fpk.sh $$${{ matrix.platform }}
-        working-directory: $$${{ github.workspace }}
+          SKIP_PACK=1 ./deploy/scripts/build-native-fpk.sh ${{ matrix.platform }}
+        working-directory: ${{ github.workspace }}
 
       - name: Verify staging
         run: |
@@ -130,7 +130,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: $$${{ env.GO_VERSION }}
+          go-version: ${{ env.GO_VERSION }}
           cache: false
 
       - name: Test config parsing
@@ -138,7 +138,7 @@ jobs:
           cd core
           GOPROXY=off GOSUMDB=off CGO_ENABLED=0 go run ./cmd/hosts-optimizer -check-config
         env:
-          HO_CONFIG: $$${{ github.workspace }}/deploy/config-schema
+          HO_CONFIG: ${{ github.workspace }}/deploy/config-schema
           HO_OUTPUT: /tmp/ho-out
           HO_STATE: /tmp/ho-state
           HO_PORT: 18088
@@ -150,26 +150,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # 鍏抽敭锛氫笉鑷姩杞崲琛屽熬锛屼繚鎸佸師鏍锋鏌?          # 浣?GitHub Actions 榛樿浼氭寜 .gitattributes 澶勭悊
-          # 杩欓噷鐢?raw 妫€鏌?
+          # 关键：不自动转换行尾，保持原样检查
+          # 但 GitHub Actions 默认会按 .gitattributes 处理
+          # 这里用 raw 检查
+
       - name: Check CRLF in shell/scripts
         run: |
-          # 妫€鏌?.sh銆乧md/* 蹇呴』鏄?LF
+          # 检查 .sh、cmd/* 必须是 LF
           find . -type f \( -name "*.sh" -o -path "./deploy/fnos-native-fpk/cmd/*" \) ! -name "*.fpk" ! -name "*.png" | while read f; do
             if grep -q $'\r' "$f"; then
               echo "CRLF found: $f"
               exit 1
             fi
           done
-          echo "鎵€鏈夎剼鏈枃浠跺潎涓?LF"
+          echo "所有脚本文件均为 LF"
 
       - name: Check binary files not treated as text
         run: |
-          # .png .fpk 搴斾负 binary
+          # .png .fpk 应为 binary
           find . -type f \( -name "*.png" -o -name "*.fpk" \) | while read f; do
             if file "$f" | grep -q "text"; then
-              echo "浜岃繘鍒舵枃浠惰褰撲綔鏂囨湰: "
+              echo "binary treated as text: $f"
               exit 1
             fi
           done
-          echo "浜岃繘鍒舵枃浠舵爣璁版纭?
+          echo "二进制文件标记正确"
