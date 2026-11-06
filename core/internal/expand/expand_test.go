@@ -108,6 +108,37 @@ func TestExpandMaxSubdomains(t *testing.T) {
 	}
 }
 
+func TestApplyRulesWithFullHostnames(t *testing.T) {
+	exp := New(Options{KnownRules: map[string][]string{
+		"github.com": {"api.github.com", "raw.githubusercontent.com"},
+	}})
+
+	got := exp.applyRules("github.com")
+	if len(got) != 2 {
+		t.Fatalf("期望 2 个完整主机名，实际 %d 个: %v", len(got), got)
+	}
+	want := map[string]bool{"api.github.com": true, "raw.githubusercontent.com": true}
+	for _, d := range got {
+		if !want[d] {
+			t.Errorf("出现重复拼接或非预期域名: %s", d)
+		}
+	}
+}
+
+func TestApplyRulesRootMatchIsExactSuffix(t *testing.T) {
+	exp := New(Options{KnownRules: map[string][]string{
+		"github.com": {"gist.github.com"},
+	}})
+
+	if got := exp.applyRules("notgithub.com"); len(got) != 0 {
+		t.Fatalf("notgithub.com 不应命中 github.com 规则: %v", got)
+	}
+	got := exp.applyRules("api.github.com")
+	if len(got) != 1 || got[0] != "gist.github.com" {
+		t.Fatalf("子域名应命中根规则，实际: %v", got)
+	}
+}
+
 func hasSuffix(s, suffix string) bool {
 	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
 }

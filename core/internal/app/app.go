@@ -20,6 +20,7 @@ import (
 
 	"hosts-optimizer/internal/config"
 	"hosts-optimizer/internal/dnsquery"
+	"hosts-optimizer/internal/expand"
 	"hosts-optimizer/internal/output"
 	"hosts-optimizer/internal/probe"
 	"hosts-optimizer/internal/store"
@@ -182,9 +183,33 @@ func (a *App) doRound(ctx context.Context) (int, error) {
 	timeout := time.Duration(d.TimeoutSeconds) * time.Second
 	started := time.Now()
 
-	entries := make([]output.Entry, 0, len(rt.Config.Domains))
+	targets := make([]config.Target, 0, len(rt.Config.Domains))
+	seen := make(map[string]bool, len(rt.Config.Domains))
 	for _, dom := range rt.Config.Domains {
 		t := rt.Config.Resolve(dom)
+		if seen[t.Name] {
+			continue
+		}
+		seen[t.Name] = true
+		targets = append(targets, t)
+	}
+	// 展开放在配置域名之后，确保用户在 domains.json 里的显式配置优先。
+	base := append([]config.Target(nil), targets...)
+	for _, t := range base {
+		if !t.Expand {
+			continue
+		}
+		for _, sub := range a.expandSubdomains(ctx, t, d) {
+			if seen[sub.Name] {
+				continue
+			}
+			seen[sub.Name] = true
+			targets = append(targets, sub)
+		}
+	}
+
+	entries := make([]output.Entry, 0, len(targets))
+	for _, t := range targets {
 		var ips []string
 		if len(t.Candidates) > 0 {
 			ips = t.Candidates
@@ -265,6 +290,8 @@ func (a *App) handle(w http.ResponseWriter, r *http.Request) {
 		a.refresh(w, r)
 	case "/api/domains":
 		a.handleDomainsConfig(w, r)
+	case "/api/expand":
+		a.handleExpand(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -372,6 +399,126 @@ func (a *App) handleDomainsConfig(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Allow", "GET, PUT, POST")
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "仅支持 GET / PUT"})
 	}
+}
+
+// expandSubdomains 对开启 expand 的主域名做一次发现，把可解析的子域名转成待探测目标。
+// 展开失败只记录日志并跳过，不影响本轮其余域名。
+func (a *App) expandSubdomains(ctx context.Context, t config.Target, d config.Defaults) []config.Target {
+	sources, err := parseExpandSources(t.ExpandSources)
+	if err != nil {
+		log.Printf("[%s] 展开来源配置非法，已跳过: %v", t.Name, err)
+		return nil
+	}
+	timeout := time.Duration(t.ExpandTimeout) * time.Second
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	expander := expand.New(expand.Options{
+		Sources:       sources,
+		Concurrency:   t.ExpandConcurrency,
+		Timeout:       timeout,
+		MaxSubdomains: t.ExpandMaxSubdomains,
+		ProbeDNS:      d.ProbeDNS,
+	})
+	expandCtx, cancel := context.WithTimeout(ctx, timeout+timeout/2)
+	defer cancel()
+	results, err := expander.Expand(expandCtx, t.Name)
+	if err != nil {
+		log.Printf("[%s] 域名展开失败: %v", t.Name, err)
+		return nil
+	}
+	subs := make([]config.Target, 0, len(results))
+	for _, r := range results {
+		if !r.Resolved || len(r.IPs) == 0 {
+			continue
+		}
+		sub := t
+		sub.Name = r.Domain
+		sub.SNI = r.Domain
+		sub.Candidates = append([]string(nil), r.IPs...)
+		sub.Expand = false
+		subs = append(subs, sub)
+	}
+	if len(subs) > 0 {
+		log.Printf("[%s] 域名展开：%d 个子域名可解析", t.Name, len(subs))
+	}
+	return subs
+}
+
+// handleExpand 按需展开主域名，返回发现的子域名及其解析结果。
+// 只做发现与 DNS 校验，不修改配置、不触发探测轮次。
+func (a *App) handleExpand(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "仅支持 POST"})
+		return
+	}
+	if !strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+		writeJSON(w, http.StatusUnsupportedMediaType, map[string]any{"ok": false, "error": "需要 Content-Type: application/json"})
+		return
+	}
+	var req struct {
+		Domain  string   `json:"domain"`
+		Sources []string `json:"sources"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "解析请求失败: " + err.Error()})
+		return
+	}
+	domain := strings.ToLower(strings.TrimSpace(req.Domain))
+	if domain == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "domain 不能为空"})
+		return
+	}
+	rt, err := config.Load()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "加载配置失败: " + err.Error()})
+		return
+	}
+	d := rt.Config.Defaults
+	sources, err := parseExpandSources(req.Sources)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if len(sources) == 0 {
+		sources, _ = parseExpandSources(d.ExpandSources)
+	}
+	timeout := time.Duration(d.ExpandTimeoutSeconds) * time.Second
+	expander := expand.New(expand.Options{
+		Sources:       sources,
+		Concurrency:   d.ExpandConcurrency,
+		Timeout:       timeout,
+		MaxSubdomains: d.ExpandMaxSubdomains,
+		ProbeDNS:      d.ProbeDNS,
+	})
+	ctx, cancel := context.WithTimeout(r.Context(), timeout+timeout/2)
+	defer cancel()
+	results, err := expander.Expand(ctx, domain)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "domain": domain, "results": results})
+}
+
+// parseExpandSources 校验并去重展开来源，空列表表示使用全局默认。
+func parseExpandSources(values []string) ([]expand.Source, error) {
+	out := make([]expand.Source, 0, len(values))
+	seen := make(map[expand.Source]bool, len(values))
+	for _, v := range values {
+		s := expand.Source(strings.ToLower(strings.TrimSpace(v)))
+		switch s {
+		case expand.SourceCT, expand.SourceWordlist, expand.SourceRules:
+			if !seen[s] {
+				seen[s] = true
+				out = append(out, s)
+			}
+		default:
+			return nil, fmt.Errorf("非法展开来源 %q，合法值: ct/wordlist/rules", v)
+		}
+	}
+	return out, nil
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

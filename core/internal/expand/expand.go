@@ -253,7 +253,9 @@ func (e *Expander) generateWordlist(domain string) []string {
 	return subs
 }
 
-// applyRules 应用内置服务规则
+// applyRules 应用内置服务规则。
+// 规则值既可以是完整主机名（如 raw.githubusercontent.com），
+// 也可以是单段标签（如 api），后者会拼接到当前域名下。
 func (e *Expander) applyRules(domain string) []string {
 	rules := e.opts.KnownRules
 	if rules == nil {
@@ -261,13 +263,29 @@ func (e *Expander) applyRules(domain string) []string {
 	}
 
 	var subs []string
-	for root, subdomains := range rules {
-		if strings.HasSuffix(domain, root) || domain == root {
-			for _, sub := range subdomains {
-				subs = append(subs, sub+"."+domain)
+	seen := make(map[string]bool)
+	for root, entries := range rules {
+		root = strings.ToLower(strings.TrimSpace(root))
+		if root == "" || (domain != root && !strings.HasSuffix(domain, "."+root)) {
+			continue
+		}
+		for _, entry := range entries {
+			entry = strings.ToLower(strings.TrimSpace(entry))
+			if entry == "" {
+				continue
 			}
+			candidate := entry
+			if !strings.Contains(entry, ".") {
+				candidate = entry + "." + domain
+			}
+			if candidate == domain || seen[candidate] {
+				continue
+			}
+			seen[candidate] = true
+			subs = append(subs, candidate)
 		}
 	}
+	sort.Strings(subs)
 	return subs
 }
 
@@ -275,21 +293,21 @@ func (e *Expander) applyRules(domain string) []string {
 func defaultKnownRules() map[string][]string {
 	return map[string][]string{
 		"github.com": {
+			"api.github.com",
+			"gist.github.com",
+			"assets.github.com",
+			"collector.github.com",
+			"github.githubassets.com",
 			"raw.githubusercontent.com",
 			"gist.githubusercontent.com",
-			"assets.github.com",
 			"avatars.githubusercontent.com",
 			"camo.githubusercontent.com",
 			"user-images.githubusercontent.com",
-			"github.githubassets.com",
-			"collector.github.com",
-			"api.github.com",
-			"github.com",
+			"objects.githubusercontent.com",
 		},
 		"gitlab.com": {
 			"registry.gitlab.com",
 			"packages.gitlab.com",
-			"gitlab.com",
 		},
 		"googleapis.com": {
 			"www.googleapis.com",
@@ -302,13 +320,11 @@ func defaultKnownRules() map[string][]string {
 			"api.cloudflare.com",
 			"dash.cloudflare.com",
 			"workers.cloudflare.com",
-			"cloudflare.com",
 		},
 		"docker.io": {
 			"registry-1.docker.io",
 			"auth.docker.io",
 			"index.docker.io",
-			"docker.io",
 		},
 		"githubusercontent.com": {
 			"raw.githubusercontent.com",
@@ -316,7 +332,7 @@ func defaultKnownRules() map[string][]string {
 			"user-images.githubusercontent.com",
 			"avatars.githubusercontent.com",
 			"camo.githubusercontent.com",
-			"githubusercontent.com",
+			"objects.githubusercontent.com",
 		},
 	}
 }
