@@ -113,7 +113,7 @@ jobs:
 
       - name: Build FPK (skip fnpack)
         run: |
-          SKIP_PACK=1 ./deploy/scripts/build-native-fpk.sh ${{ matrix.platform }}
+          SKIP_PACK=1 bash ./deploy/scripts/build-native-fpk.sh ${{ matrix.platform }}
         working-directory: ${{ github.workspace }}
 
       - name: Verify staging
