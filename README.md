@@ -68,7 +68,7 @@ AdGuard Home 订阅
    ```
 
    `agh.txt` 使用 `||domain^$dnsrewrite=NOERROR;A;IP`，覆盖子域且让 AAAA 天然返回 NODATA（详见下方「已查证的坑」）。
-6. **添加域名**：编辑 `/var/apps/hosts-optimizer-native/etc/domains.json`，在 `domains` 数组追加对象；保存后点页面上的「立即刷新」即生效。
+6. **添加域名**：打开状态页，在「编辑域名清单」中修改并点「保存并生效」；也可直接编辑 `/var/apps/hosts-optimizer-native/etc/domains.json`。
 
 > 若用 HTTPS 访问飞牛桌面，iframe 加载 `http://...:18088` 可能被浏览器按混合内容拦截，表现为窗口空白。此时改用浏览器直接访问 `http://<NAS_IP>:18088/`，或把 `app/ui/config` 的 `type` 改为 `url`。
 
@@ -241,21 +241,23 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 
 **已验证**
 
-- `GOPROXY=off` 下 `go vet` / `go test ./...`（4 个包单测）、双架构静态 ELF 交叉编译通过。
+- `GOPROXY=off` 下 `go vet` / `go test ./...`（全部包单测）、双架构静态 ELF 交叉编译通过。
 - 本机端到端：`/status.json` 200、`ETag` → 304、`POST /refresh` 200、三份产物落盘；失败路径保留上一轮结果且 `hosts.txt` 返回 503。
 - `fnpack build` 通过并产出 x86 `.fpk`；包结构、manifest 字段与桌面入口文件已解包核对。
-- **真机**：二进制以包用户（uid 900）运行可监听、抓取、写产物，SIGTERM 干净退出；`github.com` / `raw.githubusercontent.com` 的 TLS 校验通过并产出真实 IP；无限重启问题已修复。
+- **真机 1.0.0**：二进制以包用户（uid 900）运行可监听、抓取、写产物，SIGTERM 干净退出；`github.com` / `raw.githubusercontent.com` 的 TLS 校验通过并产出真实 IP；无限重启问题已修复。
+- **真机 1.0.1**：`app stop` / `app start` / `app restart` 均返回成功，应用中心状态与真实进程一致；卸载重装后 `domains.json`、`output/`、`state/` 保留；`/`、`/status.json`、`/hosts.txt`、`/agh.txt` 均返回 200，`ETag` → 304；`10350` 已修复。
 
 **待验证 / 已知限制**
 
 - 桌面图标入口（本轮新补）的真机显示效果尚未确认；覆盖安装后可能需要重启 `trim_app_center.service`。
+- 尚未在真实 AdGuard Home 实例中验证订阅解析与规则生效；当前只验证了订阅端点内容与 HTTP 语义。
 - 真实公网域名下的一周 IP 抖动、滞回表现与多源 DNS 并集质量未长期观测。
-- **域名清单仍需在设备侧编辑**（SSH / 文件管理器 → `etc/domains.json`），页面内在线编辑属于二期。
+- `POST /refresh` 是同步接口：域名较多且候选超时时，单轮可能超过 50 秒；若同时撞上定时轮次，客户端可能等待超过 90 秒。后续可改为异步任务 + 状态轮询。
 - 图标是占位图（尺寸合规但很素），发布前建议替换。
 - A / B 轨道未验证；`config/resource` 的 `data-share` 共享目录编辑方案未启用。
 - `x509.SystemCertPool()` 在个别精简 fnOS 版本可能读不到系统 CA，此时需随包 `ca-bundle.crt`。
 
-发布前请按 [`research/2026-11-05-fnos-dual-deployment.md`](research/2026-11-05-fnos-dual-deployment.md) 第 6 节验收清单逐项跑一遍（首次安装 / 启停重启 / 卸载重装 / 升级后配置与产物不丢 / AGH 订阅生效 / 全灭时保留上一轮）。
+首次安装、启停重启、卸载重装、配置与产物保留、全灭时保留上一轮均已在真机验证；发布前还需补做真实 AdGuard Home 订阅接入与解析验证。
 
 ---
 
@@ -265,6 +267,7 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 - **`fnpack` 入口 ID 上限 32 字符**：超了直接 `Packing failed`。
 - **Windows 打包丢 x 位**：目录 `0644` 无法进入，见上节 `install_callback` 的 `chmod`。
 - **CRLF / BOM**：会让 `#!/bin/bash` 或 JSON 入口配置失效，见 `.gitattributes`。
+- **`pkill -f` 会误杀生命周期脚本**：`cmd/main` 路径本身包含 `hosts-optimizer`，用 `pkill -f "hosts-optimizer"` 会连正在执行 stop 的脚本一起杀掉，应用中心收到非零退出码并报 `10350`，表现为“进程已停止但操作失败”。必须用 `pidof` / `pgrep -x` 按进程名精确匹配；1.0.1 已修复并加入回归测试。
 
 ---
 

@@ -36,7 +36,7 @@ Linux / macOS / Git Bash：
 SKIP_PACK=1 ./deploy/scripts/build-native-fpk.sh x86   # 只编译，不调 fnpack
 ./deploy/scripts/build-native-fpk.sh x86
 ./deploy/scripts/build-native-fpk.sh arm
-# → deploy/dist/hosts-optimizer-native-1.0.0-x86.fpk / -arm.fpk
+# → deploy/dist/hosts-optimizer-native-1.0.1-x86.fpk / -arm.fpk
 ```
 
 Windows PowerShell（开发机没有 bash / pwsh 时用这份等价脚本；脚本为纯 ASCII，规避中文 GBK/UTF-8 编码问题）：
@@ -112,13 +112,15 @@ curl -X POST http://127.0.0.1:18088/refresh
 
 完整的「已验证 / 待验证」清单见仓库根 [`README.md`](../README.md)。
 
-**已完成**：`fnpack build` 通过并产出 x86 `.fpk`；真机安装后的无限重启已修复（`cmd/main` 改为 source `cmd/common` + `cmd/service-setup` 并调用 `start_daemon` / `stop_daemon` / `daemon_status`）；桌面入口（`desktop_uidir` + `app/ui/config` + 图标）已补齐；`install_callback` 在真机补回目录执行位；真实公网域名的 TLS 校验与产物生成已验证。
+**已完成**：`fnpack build` 通过并产出 x86 `.fpk`；真机安装后的无限重启已修复（`cmd/main` 改为 source `cmd/common` + `cmd/service-setup` 并调用 `start_daemon` / `stop_daemon` / `daemon_status`）；桌面入口（`desktop_uidir` + `app/ui/config` + 图标）已补齐；`install_callback` 在真机补回目录执行位；真实公网域名的 TLS 校验与产物生成已验证；页面内在线编辑 `/api/domains` 已实现。
+
+**1.0.1 真机验收**：修复 stop 脚本用 `pkill -f` 误杀自身导致的 `10350`；`app stop` / `app start` / `app restart` 均返回成功且应用中心状态与进程一致；卸载重装后 `domains.json`、`output/`、`state/` 保留；订阅端点 200、`ETag` 304 通过。
 
 **仍需**：
 
 1. 确认桌面图标在真机显示（覆盖安装后可能要 `systemctl restart trim_app_center.service`）
-2. 跑研究报告第 6 节完整验收清单（启停 / 重启 / 卸载重装 / 升级后配置与产物不丢 / AGH 订阅生效 / 全灭时保留上一轮）
+2. 在真实 AdGuard Home 实例中验证订阅解析与规则生效
 3. 用 `curl --resolve` 观察一周 IP 抖动与滞回表现
 4. 替换占位图标；用 `uname -m` 确认设备架构、选对安装包
-5. 页面内在线编辑 `domains.json`（二期；当前需 SSH / 文件管理器编辑）
+5. `POST /refresh` 当前同步执行，域名多时可能超过客户端超时；后续改为异步任务 + 状态轮询
 6. 若个别精简版 fnOS 上 `x509.SystemCertPool()` 读不到系统 CA，放一份 `deploy/ca-bundle.crt`，构建脚本会随包携带

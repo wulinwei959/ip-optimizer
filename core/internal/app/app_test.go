@@ -3,6 +3,7 @@ package app
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -50,5 +51,28 @@ func TestHandleExpandRequiresJSONContentType(t *testing.T) {
 
 	if rec.Code != http.StatusUnsupportedMediaType {
 		t.Fatalf("期望 415，实际 %d", rec.Code)
+	}
+}
+
+// 回归保护：stop 脚本不能用 pkill -f 模糊匹配应用名。
+// cmd/main 自身路径也包含 hosts-optimizer，模糊匹配会把执行 stop 的脚本一起杀掉，
+// 应用中心会收到非零退出码并报 10350，表现为“进程已停止但操作失败”。
+func TestLifecycleStopDoesNotUseBroadPkill(t *testing.T) {
+	script, err := os.ReadFile("../../../deploy/fnos-native-fpk/cmd/common")
+	if err != nil {
+		t.Fatalf("读取生命周期脚本失败: %v", err)
+	}
+	body := string(script)
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.Contains(line, `pkill -f "hosts-optimizer"`) {
+			t.Fatal("stop 脚本不得使用 pkill -f 模糊匹配应用名")
+		}
+	}
+	if !strings.Contains(body, "pidof hosts-optimizer") && !strings.Contains(body, "pgrep -x hosts-optimizer") {
+		t.Fatal("stop 脚本应使用进程名精确匹配作为兜底清理")
 	}
 }
