@@ -1,6 +1,6 @@
 # 技术文档
 
-> 适用版本：1.0.10 · 更新：2026-11-07
+> 适用版本：1.0.11 · 更新：2026-11-07
 >
 > 本文描述内部实现与数据契约；配置字段与部署步骤见 [`deploy/config-schema/README.md`](../deploy/config-schema/README.md) 与 [`deploy/README.md`](../deploy/README.md)。
 
@@ -102,6 +102,12 @@
 
 每行一条 JSON，字段：`time`、`round_id`、`domain`、`group`、`ip`、`latency_ms`、`candidates`、`validated`、`reason`。按月分片、gzip 压缩，默认保留 12 个月（`history_retention_months`）。
 
+### 禁用语义
+
+- `domains[].disabled=true` 的域名不参与任何探测轮次，也不写入 `hosts.txt` / `agh.txt` / `status.json`。
+- 通过 `/api/disable` 禁用时立即从当前快照与产物中移除；启用后标记为「待探测」，下一轮或手动刷新恢复。
+- 保存配置时同样会移除已禁用域名，避免「页面已禁用但订阅仍生效」。
+
 ## 6. HTTP API
 
 | 方法 | 路径 | 说明 |
@@ -116,6 +122,7 @@
 | GET | `/api/history` | 历史查询（domain/group/from/to/limit） |
 | GET | `/api/candidates` | 最近一轮候选 IP 与延迟 |
 | POST | `/api/switch` | 手动切换候选 IP 并立即生效 |
+| POST | `/api/disable` | 启用/禁用域名（按 names 或 group），禁用后立即从产物移除 |
 | GET | `/api/logs` | 增量读取运行日志 |
 
 写接口要求 `Content-Type: application/json`（阻止简单跨站表单），但**没有登录鉴权**，只应部署在内网。

@@ -14,7 +14,7 @@
 
 仓库：<https://github.com/wulinwei959/ip-optimizer>
 
-当前版本：**1.0.10**（版本历史与验证记录见 [`docs/progress.md`](docs/progress.md)）
+当前版本：**1.0.11**（版本历史与验证记录见 [`docs/progress.md`](docs/progress.md)）
 
 ---
 
@@ -60,6 +60,7 @@ AdGuard Home 订阅
 - **批量刷新选中**：展开主域名分组后可勾选单个域名或整组，点「刷新选中」只重跑这些域名，其余结果保持不变。
 - **候选延时与手动切换**：点击表格中的延迟数值可查看本轮全部可连接 IP 的延迟，并手动切换当前生效 IP；切换会立即写入状态与订阅产物。
 - **保存即显示**：新增域名保存后立即出现在分组中，未探测时标记「待探测」，可直接点行内「刷新」探测。
+- **域名禁用**：单个域名可勾选「禁用」，域名组可用「禁用本组」整组切换；禁用域名不参与探测、从 `hosts.txt` / `agh.txt` 中移除，状态表显示「已禁用」，可随时启用。
 - **AGH 规则刷新**：「刷新 AGH 规则」按钮只根据当前快照重新生成 `agh.txt`，不重新探测 DNS/TCP；手动刷新选中域名或切换 IP 后也会自动同步订阅文件。
 - **异步刷新**：`POST /refresh` 立即返回 `task_id` 并在后台执行，页面轮询 `/api/refresh-status` 显示进度，长时间探测不再阻塞请求。
 - **fnOS 桌面入口**：桌面图标以 iframe 窗口打开状态页，可查看生效 IP / 延迟、复制订阅地址、刷新选中域名或单独重写 AGH 规则；表格支持勾选与批量操作。
@@ -201,6 +202,7 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 | `GET /api/candidates?domain=<域名>` | 返回该域名最近一轮全部可连接 IP 与延迟、当前生效 IP |
 | `POST /api/switch` | 手动切换：JSON 体 `{"domain":"a.com","ip":"1.2.3.4"}`，IP 必须在该域名最近候选列表中 |
 | `POST /api/refresh-agh` | 只用当前快照重写 `agh.txt`，返回字节数，不触发探测 |
+| `POST /api/disable` | 启用/禁用域名：`{"names":["a.com"],"disabled":true}` 或 `{"group":"github.com","disabled":true}`；禁用后立即从产物移除 |
 | `GET /api/domains` | 读取 `domains.json` 原文 |
 | `PUT /api/domains` | 校验并原子写回 `domains.json`（要求 `Content-Type: application/json`） |
 | `POST /api/expand` | 按需发现主域名的相关子域名，返回解析结果（不修改配置） |
