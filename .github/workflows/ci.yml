@@ -23,7 +23,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version: {{ env.GO_VERSION }}
           cache: false
 
       - name: Verify go.mod
@@ -66,25 +66,25 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version: {{ env.GO_VERSION }}
           cache: false
 
       - name: Build static binary
         run: |
           cd core
-          GOOS=linux GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 GOPROXY=off GOSUMDB=off \
-            go build -trimpath -ldflags="-s -w" -o hosts-optimizer-${{ matrix.platform }} ./cmd/hosts-optimizer
-          file hosts-optimizer-${{ matrix.platform }}
+          GOOS=linux GOARCH={{ matrix.goarch }} CGO_ENABLED=0 GOPROXY=off GOSUMDB=off \
+            go build -trimpath -ldflags="-s -w" -o hosts-optimizer-{{ matrix.platform }} ./cmd/hosts-optimizer
+          file hosts-optimizer-{{ matrix.platform }}
 
       - name: Verify static binary
         run: |
-          ldd hosts-optimizer-${{ matrix.platform }} 2>&1 | grep -q "not a dynamic executable" && echo "纯静态链接" || (echo "非静态链接" && exit 1)
+          ldd hosts-optimizer-{{ matrix.platform }} 2>&1 | grep -q "not a dynamic executable" && echo "pure static" || (echo "not static" && exit 1)
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: hosts-optimizer-${{ matrix.platform }}
-          path: core/hosts-optimizer-${{ matrix.platform }}
+          name: hosts-optimizer-{{ matrix.platform }}
+          path: core/hosts-optimizer-{{ matrix.platform }}
           retention-days: 7
 
   build-fpk-skip:
@@ -101,19 +101,19 @@ jobs:
       - name: Download built binary
         uses: actions/download-artifact@v4
         with:
-          name: hosts-optimizer-${{ matrix.platform }}
+          name: hosts-optimizer-{{ matrix.platform }}
           path: core/app/bin
 
       - name: Prepare staging
         run: |
           mkdir -p core/app/bin
-          mv core/app/bin/hosts-optimizer-${{ matrix.platform }} core/app/bin/hosts-optimizer
+          mv core/app/bin/hosts-optimizer-{{ matrix.platform }} core/app/bin/hosts-optimizer
           chmod +x core/app/bin/hosts-optimizer
 
       - name: Build FPK (skip fnpack)
         run: |
-          SKIP_PACK=1 ./deploy/scripts/build-native-fpk.sh ${{ matrix.platform }}
-        working-directory: ${{ github.workspace }}
+          SKIP_PACK=1 ./deploy/scripts/build-native-fpk.sh {{ matrix.platform }}
+        working-directory: {{ github.workspace }}
 
       - name: Verify staging
         run: |
@@ -130,7 +130,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version: {{ env.GO_VERSION }}
           cache: false
 
       - name: Test config parsing
@@ -138,7 +138,7 @@ jobs:
           cd core
           GOPROXY=off GOSUMDB=off CGO_ENABLED=0 go run ./cmd/hosts-optimizer -check-config
         env:
-          HO_CONFIG: ${{ github.workspace }}/deploy/config-schema
+          HO_CONFIG: {{ github.workspace }}/deploy/config-schema
           HO_OUTPUT: /tmp/ho-out
           HO_STATE: /tmp/ho-state
           HO_PORT: 18088
@@ -158,8 +158,8 @@ jobs:
         run: |
           # 检查 .sh、cmd/* 必须是 LF
           find . -type f \( -name "*.sh" -o -path "./deploy/fnos-native-fpk/cmd/*" \) ! -name "*.fpk" ! -name "*.png" | while read f; do
-            if grep -q $'\r' "$f"; then
-              echo "CRLF found: $f"
+            if grep -q $'\r' ""; then
+              echo "CRLF found: "
               exit 1
             fi
           done
@@ -169,8 +169,8 @@ jobs:
         run: |
           # .png .fpk 应为 binary
           find . -type f \( -name "*.png" -o -name "*.fpk" \) | while read f; do
-            if file "$f" | grep -q "text"; then
-              echo "二进制文件被当作文本: $f"
+            if file "" | grep -q "text"; then
+              echo "二进制文件被当作文本: "
               exit 1
             fi
           done
