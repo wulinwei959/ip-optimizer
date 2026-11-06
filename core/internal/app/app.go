@@ -634,7 +634,7 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 var indexTmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>hosts-optimizer</title>
 <style>
-:root{--bg:#f4f6f9;--card:#fff;--line:#e5e8ee;--text:#1f2937;--muted:#6b7280;--accent:#2563eb;--accent-dark:#1d4ed8;--danger:#dc2626;--ok:#16a34a;--radius:12px}
+:root{--bg:#f4f6f9;--card:#fff;--line:#e5e8ee;--text:#1f2937;--muted:#6b7280;--accent:#2563eb;--accent-dark:#1d4ed8;--danger:#dc2626;--ok:#16a34a;--surface-2:#f8fafc;--radius:12px}
 *{box-sizing:border-box}
 body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;background:var(--bg);color:var(--text);max-width:1180px;margin:0 auto;padding:30px 20px 56px;line-height:1.65}
 h1{font-size:30px;letter-spacing:-.02em;margin:0 0 8px}
@@ -702,8 +702,14 @@ summary::marker{color:var(--accent)}
 .cfg-form.active{display:block}
 .cfg-json-wrap{display:none}
 .cfg-json-wrap.active{display:block}
-.cfg-section{border:1px solid var(--line);border-radius:10px;padding:12px 14px 14px;margin:0 0 12px}
-.cfg-section legend{padding:0 6px;font-size:13px;font-weight:600;color:#374151}
+.cfg-section{border:1px solid var(--line);border-radius:10px;margin:0 0 12px;background:var(--card);overflow:hidden}
+.cfg-section>summary{position:relative;padding:12px 14px 12px 32px;font-size:13px;font-weight:600;color:var(--text);cursor:pointer;list-style:none;user-select:none}
+.cfg-section>summary::-webkit-details-marker{display:none}
+.cfg-section>summary::marker{content:""}
+.cfg-section>summary::before{content:"▶";position:absolute;left:14px;top:13px;font-size:10px;color:var(--accent)}
+.cfg-section[open]>summary::before{content:"▼"}
+.cfg-section[open]>summary{border-bottom:1px solid var(--line);background:var(--surface-2)}
+.cfg-body{padding:12px 14px 14px}
 .field-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
 .field-grid label{display:flex;flex-direction:column;gap:5px;font-size:13px;color:#4b5563}
 .field-grid label.wide{grid-column:1/-1}
@@ -768,7 +774,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
   .card{padding:14px}
   #discoverInput{flex:1 1 100%}
 }
-:root[data-theme="dark"]{--bg:#0f1216;--card:#171c22;--line:#2a323c;--text:#e6e9ee;--muted:#9aa4b2;--accent:#60a5fa;--accent-dark:#3b82f6;--danger:#f87171;--ok:#34d399}
+:root[data-theme="dark"]{--bg:#0f1216;--card:#171c22;--line:#2a323c;--text:#e6e9ee;--muted:#9aa4b2;--accent:#60a5fa;--accent-dark:#3b82f6;--danger:#f87171;--ok:#34d399;--surface-2:#1d242c}
 :root[data-theme="dark"] .card{box-shadow:0 1px 2px rgba(0,0,0,.35)}
 :root[data-theme="dark"] th{background:#1d242c;color:#cbd5e1}
 :root[data-theme="dark"] tbody tr:hover{background:#1f272f}
@@ -797,7 +803,6 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 :root[data-theme="dark"] .dropdown-item .domain{color:var(--text)}
 :root[data-theme="dark"] .cfg-tabs{background:#232b35}
 :root[data-theme="dark"] .cfg-tabs button.active{background:#2f3945;color:var(--accent)}
-:root[data-theme="dark"] .cfg-section legend{color:#cbd5e1}
 :root[data-theme="dark"] .field-grid label,:root[data-theme="dark"] .domain-main label{color:#b6c0cc}
 :root[data-theme="dark"] .checks label{color:#cbd5e1}
 :root[data-theme="dark"] .domain-item{background:var(--card)}
@@ -878,49 +883,57 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 </div>
 
 <div id="cfgForm" class="cfg-form active">
-  <fieldset class="cfg-section">
-    <legend>定时与探测</legend>
-    <div class="field-grid">
-      <label>轮询周期（分钟）<input id="fSchedule" type="number" min="1"></label>
-      <label>探测端口<input id="fPort" type="number" min="1" max="65535"></label>
-      <label>并发数<input id="fConcurrency" type="number" min="1"></label>
-      <label>最大候选 IP 数<input id="fMaxCandidates" type="number" min="1"></label>
-      <label>TCP 探测轮数<input id="fTCPRounds" type="number" min="1"></label>
-      <label>单次超时（秒）<input id="fTimeout" type="number" min="1"></label>
+  <details class="cfg-section">
+    <summary>定时与探测</summary>
+    <div class="cfg-body">
+      <div class="field-grid">
+        <label>轮询周期（分钟）<input id="fSchedule" type="number" min="1"></label>
+        <label>探测端口<input id="fPort" type="number" min="1" max="65535"></label>
+        <label>并发数<input id="fConcurrency" type="number" min="1"></label>
+        <label>最大候选 IP 数<input id="fMaxCandidates" type="number" min="1"></label>
+        <label>TCP 探测轮数<input id="fTCPRounds" type="number" min="1"></label>
+        <label>单次超时（秒）<input id="fTimeout" type="number" min="1"></label>
+      </div>
     </div>
-  </fieldset>
-  <fieldset class="cfg-section">
-    <legend>DNS 与切换策略</legend>
-    <div class="field-grid">
-      <label class="wide">探测 DNS（逗号分隔）<input id="fProbeDNS" type="text" placeholder="223.5.5.5, tls://dns.alidns.com, https://dns.cloudflare.com/dns-query"></label>
-      <label>滞回百分比（%）<input id="fHystPct" type="number" min="0"></label>
-      <label>滞回轮数<input id="fHystRounds" type="number" min="1"></label>
+  </details>
+  <details class="cfg-section">
+    <summary>DNS 与切换策略</summary>
+    <div class="cfg-body">
+      <div class="field-grid">
+        <label class="wide">探测 DNS（逗号分隔）<input id="fProbeDNS" type="text" placeholder="223.5.5.5, tls://dns.alidns.com, https://dns.cloudflare.com/dns-query"></label>
+        <label>滞回百分比（%）<input id="fHystPct" type="number" min="0"></label>
+        <label>滞回轮数<input id="fHystRounds" type="number" min="1"></label>
+      </div>
+      <p class="hint" style="margin:8px 0 0">支持 UDP（字面 IP）、DoT（tls://主机[:853]）、DoH（https://主机/路径），可混用；DoQ 暂不支持。</p>
     </div>
-    <p class="hint" style="margin:8px 0 0">支持 UDP（字面 IP）、DoT（tls://主机[:853]）、DoH（https://主机/路径），可混用；DoQ 暂不支持。</p>
-  </fieldset>
-  <fieldset class="cfg-section">
-    <legend>子域名展开</legend>
-    <div class="field-grid">
-      <label class="wide">默认展开来源
-        <span class="checks">
-          <label><input type="checkbox" id="fSrcCT" value="ct"> CT 日志</label>
-          <label><input type="checkbox" id="fSrcWL" value="wordlist"> 字典</label>
-          <label><input type="checkbox" id="fSrcRules" value="rules"> 规则</label>
-        </span>
-      </label>
-      <label>展开并发<input id="fExpandConcurrency" type="number" min="1"></label>
-      <label>展开超时（秒）<input id="fExpandTimeout" type="number" min="1"></label>
-      <label>最多子域名<input id="fExpandMax" type="number" min="1"></label>
+  </details>
+  <details class="cfg-section">
+    <summary>子域名展开</summary>
+    <div class="cfg-body">
+      <div class="field-grid">
+        <label class="wide">默认展开来源
+          <span class="checks">
+            <label><input type="checkbox" id="fSrcCT" value="ct"> CT 日志</label>
+            <label><input type="checkbox" id="fSrcWL" value="wordlist"> 字典</label>
+            <label><input type="checkbox" id="fSrcRules" value="rules"> 规则</label>
+          </span>
+        </label>
+        <label>展开并发<input id="fExpandConcurrency" type="number" min="1"></label>
+        <label>展开超时（秒）<input id="fExpandTimeout" type="number" min="1"></label>
+        <label>最多子域名<input id="fExpandMax" type="number" min="1"></label>
+      </div>
     </div>
-  </fieldset>
-  <fieldset class="cfg-section">
-    <legend>域名列表</legend>
-    <div id="domainEditor" class="domain-editor"></div>
-    <div class="bar" style="margin-top:10px">
-      <input id="newDomainName" type="text" placeholder="新增域名，如 example.com" spellcheck="false">
-      <button id="addDomainBtn" type="button">添加域名</button>
+  </details>
+  <details class="cfg-section">
+    <summary>域名列表</summary>
+    <div class="cfg-body">
+      <div id="domainEditor" class="domain-editor"></div>
+      <div class="bar" style="margin-top:10px">
+        <input id="newDomainName" type="text" placeholder="新增域名，如 example.com" spellcheck="false">
+        <button id="addDomainBtn" type="button">添加域名</button>
+      </div>
     </div>
-  </fieldset>
+  </details>
 </div>
 
 <div id="cfgJSONWrap" class="cfg-json-wrap">
