@@ -52,6 +52,8 @@ AdGuard Home 订阅
 - **按主域名分组**：状态表按可注册主域名归类（如 `api.gitlab.com` 归入 `gitlab.com`），点分组标题展开该分类的全部域名；支持整组勾选、全部展开/收起，搜索时自动展开命中分组。
 - **图形化配置**：轮询周期、探测 DNS、并发、超时、滞回、子域名展开等参数与域名列表均可在表单内直接填写，保存后自动写回 `domains.json` 并触发新一轮；需要精细控制时可切到 JSON 源码模式。
 - **加密 DNS 上游**：`probe_dns` 支持 UDP、DoT、DoH 混用，例如 `tls://dns.alidns.com`、`https://dns.cloudflare.com/dns-query`；DoQ 需第三方 QUIC 库，未引入。
+- **主题跟随系统**：默认跟随系统的深/浅色设置，也可在页面手动切换「浅色 / 深色 / 跟随系统」，选择保存在浏览器本地。
+- **应用内运行日志**：页面底部提供日志面板，内存保留最近 2000 行，支持增量刷新、暂停自动刷新、关键字筛选与清空视图，便于实时排查。
 - **异步刷新**：`POST /refresh` 立即返回 `task_id` 并在后台执行，页面轮询 `/api/refresh-status` 显示进度，长时间探测不再阻塞请求。
 - **fnOS 桌面入口**：桌面图标以 iframe 窗口打开状态页，可查看生效 IP / 延迟、一键复制订阅地址、点「立即刷新」触发新一轮；表格支持勾选与批量删除。
 
@@ -187,6 +189,7 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 | `/status.json` | 每域名候选数、通过数、生效 IP、延迟、切换原因、本轮时间 |
 | `POST /refresh` | 提交后台刷新任务，立即返回 `202` 与 `{"ok":true,"task_id":"r..."}`；已有任务在跑时复用 |
 | `GET /api/refresh-status?task_id=...` | 查询刷新进度：`state` 为 `running` / `done` / `error`，完成时带 `next_round_minutes` |
+| `GET /api/logs?after=<seq>&limit=<n>` | 增量读取运行日志，返回 `entries` 与 `last_seq`；缓冲上限 2000 行 |
 | `GET /api/domains` | 读取 `domains.json` 原文 |
 | `PUT /api/domains` | 校验并原子写回 `domains.json`（要求 `Content-Type: application/json`） |
 | `POST /api/expand` | 按需发现主域名的相关子域名，返回解析结果（不修改配置） |
@@ -258,6 +261,7 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 - **真机 1.0.2**：卸载重装后配置与产物保留，页面显示 18 个域名、17 个生效；`/`、`/status.json`、`/hosts.txt`、`/agh.txt` 均 200，`ETag` → 304；`POST /refresh` 返回 `202` + `task_id`，约 93 秒后轮询到 `state=done`（旧同步接口会超时），期间页面不阻塞；`/api/expand` 对 `github.com` 返回 50 个相关域名（12 个可解析），下拉勾选与「添加」写入配置正常；`app stop` / `app start` 均成功。
 - **真机 1.0.3**：卸载重装后配置与产物保留；状态表按主域名分组（如 `cloudflare.com` 7 个、`github.com`、`githubusercontent.com` 等），分组展开/收起与整组勾选正常；图形化表单正确带出轮询周期 60、端口 443、并发 20、候选 64、TCP 3 轮、超时 3 秒等参数，域名列表可编辑。
 - **真机 1.0.4**：把 `probe_dns` 临时改为 `https://dns.alidns.com/dns-query` + `tls://dns.alidns.com`，一轮约 75 秒完成，17/18 域名生效且候选数正常，验证后已恢复原配置；`quic://` 地址被配置校验拒绝并返回明确提示。
+- **真机 1.0.5**：页面默认跟随系统显示深色主题，手动切换浅色/深色后刷新仍保持；运行日志面板显示启动与探测日志（增量序号正常），关键字筛选可用；FPK manifest 的 `maintainer` / `distributor` 均为 `wulinwei959`，链接指向项目 GitHub。
 
 **待验证 / 已知限制**
 

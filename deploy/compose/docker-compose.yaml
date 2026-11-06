@@ -2,7 +2,7 @@
 # 配置 ./config/domains.json，产物 ./output/{hosts.txt,agh.txt,status.json}
 services:
   hosts-optimizer:
-    image: ${HO_IMAGE:-ghcr.io/your-org/hosts-optimizer:1.0.0}
+    image: ${HO_IMAGE:-ghcr.io/wulinwei959/hosts-optimizer:1.0.0}
     container_name: hosts-optimizer
     restart: unless-stopped
     # 关键：绕开 AdGuard Home，否则「用待优化的解析结果去找候选 IP」形成循环依赖

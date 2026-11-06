@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"hosts-optimizer/internal/config"
 	"hosts-optimizer/internal/dnsquery"
 	"hosts-optimizer/internal/expand"
+	"hosts-optimizer/internal/logbuf"
 	"hosts-optimizer/internal/output"
 	"hosts-optimizer/internal/probe"
 	"hosts-optimizer/internal/store"
@@ -316,6 +318,8 @@ func (a *App) handle(w http.ResponseWriter, r *http.Request) {
 		a.handleDomainsConfig(w, r)
 	case "/api/expand":
 		a.handleExpand(w, r)
+	case "/api/logs":
+		a.handleLogs(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -587,6 +591,21 @@ func (a *App) handleExpand(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "domain": domain, "results": results})
 }
 
+// handleLogs 返回内存中的运行日志；after 用于增量拉取，limit 限制单次条数。
+func (a *App) handleLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "仅支持 GET"})
+		return
+	}
+	after, _ := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	entries := logbuf.Default.Snapshot(after, limit)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "entries": entries, "last_seq": logbuf.Default.LastSeq(),
+	})
+}
+
 // parseExpandSources 校验并去重展开来源，空列表表示使用全局默认。
 func parseExpandSources(values []string) ([]expand.Source, error) {
 	out := make([]expand.Source, 0, len(values))
@@ -749,7 +768,62 @@ tr.domain-row td:nth-child(2){padding-left:32px}
   .card{padding:14px}
   #discoverInput{flex:1 1 100%}
 }
+:root[data-theme="dark"]{--bg:#0f1216;--card:#171c22;--line:#2a323c;--text:#e6e9ee;--muted:#9aa4b2;--accent:#60a5fa;--accent-dark:#3b82f6;--danger:#f87171;--ok:#34d399}
+:root[data-theme="dark"] .card{box-shadow:0 1px 2px rgba(0,0,0,.35)}
+:root[data-theme="dark"] th{background:#1d242c;color:#cbd5e1}
+:root[data-theme="dark"] tbody tr:hover{background:#1f272f}
+:root[data-theme="dark"] code{background:#2a333f}
+:root[data-theme="dark"] button{background:#1b212a;border-color:#3a4453;color:#e6e9ee}
+:root[data-theme="dark"] button:hover{background:#232b35;border-color:#4b5563}
+:root[data-theme="dark"] button.primary{background:var(--accent);border-color:var(--accent);color:#0b1220}
+:root[data-theme="dark"] button.primary:hover{background:var(--accent-dark);border-color:var(--accent-dark);color:#fff}
+:root[data-theme="dark"] button.danger{background:#1b212a;border-color:#7f3b3b}
+:root[data-theme="dark"] button.danger:hover{background:#2a1b1b;border-color:var(--danger)}
+:root[data-theme="dark"] input[type=text],:root[data-theme="dark"] input[type=number],:root[data-theme="dark"] select{background:#12171d;border-color:#3a4453;color:var(--text)}
+:root[data-theme="dark"] #statusFilter,:root[data-theme="dark"] #themeSel{background:#12171d}
+:root[data-theme="dark"] summary{color:var(--text)}
+:root[data-theme="dark"] #cfg{background:#12171d;border-color:#3a4453}
+:root[data-theme="dark"] .status-fail{background:#f87171}
+:root[data-theme="dark"] .badge{background:rgba(96,165,250,.16);color:#93c5fd}
+:root[data-theme="dark"] .badge-ct{background:rgba(251,146,60,.16);color:#fdba74}
+:root[data-theme="dark"] .badge-wl{background:rgba(52,211,153,.16);color:#6ee7b7}
+:root[data-theme="dark"] .badge-rl{background:rgba(167,139,250,.16);color:#c4b5fd}
+:root[data-theme="dark"] .discover{background:#131920;border-color:#3a4453}
+:root[data-theme="dark"] .dropdown-panel{background:var(--card);box-shadow:0 12px 32px rgba(0,0,0,.5)}
+:root[data-theme="dark"] .dropdown-head{background:#1d242c}
+:root[data-theme="dark"] .dropdown-item{border-color:#232b35}
+:root[data-theme="dark"] .dropdown-item:hover{background:#232b35}
+:root[data-theme="dark"] .dropdown-item.disabled{background:#141a21}
+:root[data-theme="dark"] .dropdown-item .domain{color:var(--text)}
+:root[data-theme="dark"] .cfg-tabs{background:#232b35}
+:root[data-theme="dark"] .cfg-tabs button.active{background:#2f3945;color:var(--accent)}
+:root[data-theme="dark"] .cfg-section legend{color:#cbd5e1}
+:root[data-theme="dark"] .field-grid label,:root[data-theme="dark"] .domain-main label{color:#b6c0cc}
+:root[data-theme="dark"] .checks label{color:#cbd5e1}
+:root[data-theme="dark"] .domain-item{background:var(--card)}
+:root[data-theme="dark"] .domain-adv{background:#141a21}
+:root[data-theme="dark"] .modal{background:var(--card);box-shadow:0 20px 50px rgba(0,0,0,.55)}
+:root[data-theme="dark"] .modal .result-item:hover{background:#232b35}
+:root[data-theme="dark"] .modal .result-domain{color:var(--text)}
+:root[data-theme="dark"] .modal .progress{background:#232b35}
+:root[data-theme="dark"] .group-row td{background:#1a222b}
+:root[data-theme="dark"] .group-row.open td{background:#1f2a37}
+:root[data-theme="dark"] .group-toggle{color:var(--text)}
+:root[data-theme="dark"] .group-toggle:hover{background:#232b35;border-color:#3a4453}
+:root[data-theme="dark"] .group-ok.has-bad{color:#fbbf24}
+:root[data-theme="dark"] tr.domain-row td{background:var(--card)}
+.log-tools{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:10px 0}
+.log-tools label{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);cursor:pointer;white-space:nowrap}
+.log-tools input[type=checkbox]{width:15px;height:15px;accent-color:var(--accent);margin:0}
+#logFilter{flex:1 1 240px;min-width:160px}
+#logView{height:340px;overflow:auto;margin:0;padding:12px;background:var(--card);border:1px solid var(--line);border-radius:8px;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;line-height:1.55;white-space:pre-wrap;word-break:break-all;color:var(--text)}
+#logView .log-line{display:block}
+#logView .log-time{color:var(--muted);margin-right:8px}
+#logState{font-size:13px;color:var(--muted)}
 </style>
+<script>
+(function(){try{var m=localStorage.getItem("ho-theme")||"system";var d=m==="dark"||(m==="system"&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.setAttribute("data-theme",d?"dark":"light");}catch(e){}})();
+</script>
 </head><body>
 <h1>hosts-optimizer</h1>
 <p class="sub">生成于 {{.GeneratedAt}} · 每 {{.ScheduleMinutes}} 分钟轮询 · 有效 {{.ActiveCount}}/{{.DomainCount}} 个域名</p>
@@ -763,6 +837,11 @@ tr.domain-row td:nth-child(2){padding-left:32px}
   <option value="all">全部</option>
   <option value="ok">正常</option>
   <option value="fail">失败</option>
+</select>
+<select id="themeSel" title="主题">
+  <option value="system">跟随系统</option>
+  <option value="light">浅色</option>
+  <option value="dark">深色</option>
 </select>
 <input id="search" type="text" placeholder="搜索域名/IP/说明...">
 <span id="msg"></span>
@@ -901,6 +980,19 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 
 </div>
 
+<div class="card">
+<details id="logDetails">
+<summary>运行日志</summary>
+<div class="log-tools">
+  <label><input type="checkbox" id="logAuto" checked> 自动刷新</label>
+  <input id="logFilter" type="text" placeholder="筛选关键字...">
+  <button id="logClear" type="button">清空视图</button>
+  <span id="logState"></span>
+</div>
+<pre id="logView"></pre>
+</details>
+</div>
+
 <div class="modal-overlay" id="expandModal">
   <div class="modal">
     <h3>展开域名: <span id="modalDomain" style="font-family:monospace;color:#1976d2"></span></h3>
@@ -918,6 +1010,27 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 (function () {
   var inp = document.getElementById("sub");
   var msg = document.getElementById("msg");
+  var themeSel = document.getElementById("themeSel");
+  var scheme = window.matchMedia("(prefers-color-scheme: dark)");
+  function currentTheme() {
+    try { return localStorage.getItem("ho-theme") || "system"; } catch (e) { return "system"; }
+  }
+  function applyTheme(mode) {
+    var dark = mode === "dark" || (mode === "system" && scheme.matches);
+    document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+    themeSel.value = mode;
+  }
+  applyTheme(currentTheme());
+  themeSel.onchange = function () {
+    try { localStorage.setItem("ho-theme", themeSel.value); } catch (e) {}
+    applyTheme(themeSel.value);
+  };
+  var onSchemeChange = function () {
+    if (currentTheme() === "system") applyTheme("system");
+  };
+  if (scheme.addEventListener) scheme.addEventListener("change", onSchemeChange);
+  else if (scheme.addListener) scheme.addListener(onSchemeChange);
+
   inp.value = location.origin + "/agh.txt";
   document.getElementById("copy").onclick = function () {
     inp.select();
@@ -1766,6 +1879,55 @@ tr.domain-row td:nth-child(2){padding-left:32px}
       });
     };
   });
+
+  // 运行日志：增量拉取 + 关键字筛选
+  var logView = document.getElementById("logView");
+  var logAuto = document.getElementById("logAuto");
+  var logFilter = document.getElementById("logFilter");
+  var logClear = document.getElementById("logClear");
+  var logState = document.getElementById("logState");
+  var logDetails = document.getElementById("logDetails");
+  var logEntries = [];
+  var logSeq = 0;
+
+  function renderLogs() {
+    var kw = logFilter.value.trim().toLowerCase();
+    var rows = logEntries.filter(function (e) {
+      return !kw || String(e.text || "").toLowerCase().indexOf(kw) >= 0;
+    });
+    var atBottom = logView.scrollTop + logView.clientHeight >= logView.scrollHeight - 24;
+    logView.textContent = "";
+    rows.forEach(function (e) {
+      var line = document.createElement("span");
+      line.className = "log-line";
+      line.appendChild(document.createTextNode(e.text || ""));
+      logView.appendChild(line);
+    });
+    if (atBottom) logView.scrollTop = logView.scrollHeight;
+    logState.textContent = rows.length + " 条" + (kw ? "（已筛选）" : "") + " · 最新序号 " + logSeq;
+  }
+  function fetchLogs() {
+    fetch("/api/logs?after=" + logSeq + "&limit=500")
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j.ok) return;
+        if (j.entries && j.entries.length) {
+          logEntries = logEntries.concat(j.entries);
+          if (logEntries.length > 2000) logEntries = logEntries.slice(logEntries.length - 2000);
+        }
+        logSeq = j.last_seq || logSeq;
+        renderLogs();
+      })
+      .catch(function () {});
+  }
+  logFilter.addEventListener("input", renderLogs);
+  logClear.onclick = function () { logEntries = []; renderLogs(); };
+  logAuto.onchange = function () { if (logAuto.checked) fetchLogs(); };
+  logDetails.addEventListener("toggle", function () { if (logDetails.open) fetchLogs(); });
+  fetchLogs();
+  setInterval(function () {
+    if (logAuto.checked && logDetails.open) fetchLogs();
+  }, 2500);
 })();
 </script>
 </body></html>`))
