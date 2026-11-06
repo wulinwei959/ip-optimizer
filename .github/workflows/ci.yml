@@ -149,10 +149,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          # 关键：不自动转换行尾，保持原样检查
-          # 但 GitHub Actions 默认会按 .gitattributes 处理
-          # 这里用 raw 检查
 
       - name: Check CRLF in shell/scripts
         run: |
