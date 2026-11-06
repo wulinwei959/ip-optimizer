@@ -5,3 +5,11 @@
 # 显式声明二进制，避免被当作文本做换行转换
 *.png binary
 *.fpk binary
+
+# CI workflow 与 GitHub Action 元数据也必须是 LF。Windows 的 core.autocrlf=true
+# 会把 LF 转成 CRLF，导致 GitHub Actions 解析 YAML 失败（jobs 列表为空）。
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.go text eol=lf

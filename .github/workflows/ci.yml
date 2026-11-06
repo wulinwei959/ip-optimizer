@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "feature/**"]
   pull_request:
     branches: [main]
 
@@ -77,8 +77,9 @@ jobs:
           file hosts-optimizer-${{ matrix.platform }}
 
       - name: Verify static binary
+        working-directory: core
         run: |
-          ldd hosts-optimizer-${{ matrix.platform }} 2>&1 | grep -q "not a dynamic executable" && echo "✅ 纯静态链接" || (echo "❌ 非静态链接" && exit 1)
+          file hosts-optimizer-${{ matrix.platform }} | grep -q "statically linked"
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
@@ -112,7 +113,7 @@ jobs:
 
       - name: Build FPK (skip fnpack)
         run: |
-          SKIP_PACK=1 ./deploy/scripts/build-native-fpk.sh ${{ matrix.platform }}
+          SKIP_PACK=1 bash ./deploy/scripts/build-native-fpk.sh ${{ matrix.platform }}
         working-directory: ${{ github.workspace }}
 
       - name: Verify staging
@@ -133,12 +134,17 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: false
 
+      - name: Prepare schema config
+        run: |
+          mkdir -p /tmp/ho-config
+          cp deploy/config-schema/domains.example.json /tmp/ho-config/domains.json
+
       - name: Test config parsing
         run: |
           cd core
           GOPROXY=off GOSUMDB=off CGO_ENABLED=0 go run ./cmd/hosts-optimizer -check-config
         env:
-          HO_CONFIG: ${{ github.workspace }}/deploy/config-schema
+          HO_CONFIG: /tmp/ho-config
           HO_OUTPUT: /tmp/ho-out
           HO_STATE: /tmp/ho-state
           HO_PORT: 18088
@@ -149,29 +155,25 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          # 关键：不自动转换行尾，保持原样检查
-          # 但 GitHub Actions 默认会按 .gitattributes 处理
-          # 这里用 raw 检查
 
       - name: Check CRLF in shell/scripts
         run: |
           # 检查 .sh、cmd/* 必须是 LF
           find . -type f \( -name "*.sh" -o -path "./deploy/fnos-native-fpk/cmd/*" \) ! -name "*.fpk" ! -name "*.png" | while read f; do
             if grep -q $'\r' "$f"; then
-              echo "❌ CRLF found: $f"
+              echo "CRLF found: $f"
               exit 1
             fi
           done
-          echo "✅ 所有脚本文件均为 LF"
+          echo "所有脚本文件均为 LF"
 
       - name: Check binary files not treated as text
         run: |
           # .png .fpk 应为 binary
           find . -type f \( -name "*.png" -o -name "*.fpk" \) | while read f; do
             if file "$f" | grep -q "text"; then
-              echo "❌ 二进制文件被当作文本: $f"
+              echo "binary treated as text: $f"
               exit 1
             fi
           done
-          echo "✅ 二进制文件标记正确"
+          echo "二进制文件标记正确"
