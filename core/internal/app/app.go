@@ -1252,23 +1252,27 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 var indexTmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>hosts-optimizer</title>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>Hosts 优选订阅</title>
 <style>
-:root{--bg:#f4f6f9;--card:#fff;--line:#e5e8ee;--text:#1f2937;--muted:#6b7280;--accent:#2563eb;--accent-dark:#1d4ed8;--danger:#dc2626;--ok:#16a34a;--surface-2:#f8fafc;--radius:12px}
+:root{--bg:#f4f6f9;--card:#fff;--line:#e5e8ee;--text:#1f2937;--muted:#6b7280;--accent:#2563eb;--accent-dark:#1d4ed8;--danger:#dc2626;--ok:#16a34a;--surface-2:#f8fafc;--radius:14px;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",system-ui,sans-serif}
 *{box-sizing:border-box}
-body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;background:var(--bg);color:var(--text);max-width:1180px;margin:0 auto;padding:30px 20px 56px;line-height:1.65}
-h1{font-size:30px;letter-spacing:-.02em;margin:0 0 8px}
-.sub{color:var(--muted);font-size:14px;margin:0 0 2px}
+body{font-family:var(--sans);background:var(--bg);color:var(--text);max-width:1180px;margin:0 auto;padding:30px 20px 56px;line-height:1.65;font-size:15px;letter-spacing:.01em;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+.page-head{display:flex;align-items:center;gap:14px;margin:2px 0 18px}
+.logo{width:46px;height:46px;flex:0 0 auto;display:block;filter:drop-shadow(0 2px 6px rgba(30,58,138,.25))}
+.logo svg{width:100%;height:100%;display:block}
+h1{font-size:26px;font-weight:700;letter-spacing:-.01em;margin:0 0 4px;line-height:1.25}
+.sub{color:var(--muted);font-size:13px;margin:0;line-height:1.5;font-variant-numeric:tabular-nums}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px;margin:16px 0;box-shadow:0 1px 2px rgba(16,24,40,.04)}
-table{border-collapse:collapse;width:100%;font-size:14px}
+table{border-collapse:collapse;width:100%;font-size:14px;font-variant-numeric:tabular-nums}
 th,td{border-bottom:1px solid var(--line);padding:12px;text-align:left;vertical-align:middle}
-th{background:#f8fafc;font-weight:600;color:#374151;white-space:nowrap;font-size:13px}
+th{background:#f8fafc;font-weight:600;color:#4b5563;white-space:nowrap;font-size:12.5px;letter-spacing:.04em}
 tbody tr:hover{background:#f9fafb}
+tbody td:nth-child(2),tbody td:nth-child(3){font-family:var(--mono);font-size:13.5px}
 tbody tr:last-child td{border-bottom:none}
 tbody td:nth-child(5){white-space:nowrap}
-code{background:#eef2f7;padding:2px 6px;border-radius:5px;font-size:13px}
+code{background:#eef2f7;padding:2px 6px;border-radius:5px;font-size:12.5px;font-family:var(--mono)}
 .bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
-button{cursor:pointer;padding:8px 16px;border:1px solid #d7dce5;border-radius:8px;background:#fff;color:#1f2937;font-size:14px;font-family:inherit;transition:background .15s,border-color .15s,box-shadow .15s}
+button{cursor:pointer;padding:8px 16px;border:1px solid #d7dce5;border-radius:8px;background:#fff;color:#1f2937;font-size:13.5px;font-weight:500;font-family:inherit;line-height:1.4;transition:background .15s,border-color .15s,box-shadow .15s}
 button:hover{background:#f3f4f6;border-color:#c3c9d4}
 button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid rgba(37,99,235,.35);outline-offset:1px}
 button:disabled{opacity:.45;cursor:not-allowed}
@@ -1276,8 +1280,8 @@ button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
 button.primary:hover{background:var(--accent-dark);border-color:var(--accent-dark)}
 button.danger{background:#fff;color:var(--danger);border-color:#f0b4b4}
 button.danger:hover{background:#fef2f2;border-color:var(--danger)}
-input[type=text],input[type=number],select{padding:8px 11px;border:1px solid #d7dce5;border-radius:8px;font-size:13px;font-family:inherit;background:#fff;color:var(--text)}
-#sub{flex:1 1 320px;min-width:200px;font-family:ui-monospace,Consolas,monospace}
+input[type=text],input[type=number],select{padding:8px 11px;border:1px solid #d7dce5;border-radius:8px;font-size:13.5px;font-family:inherit;background:#fff;color:var(--text)}
+#sub{flex:1 1 320px;min-width:200px;font-family:var(--mono)}
 #msg{font-size:14px;color:var(--muted);min-width:180px}
 #search{flex:1 1 240px;min-width:180px}
 #statusFilter{background:#fff}
@@ -1285,7 +1289,7 @@ details{margin:16px 0 0}
 summary{cursor:pointer;font-weight:600;padding:6px 0;color:#111827;font-size:15px}
 summary::marker{color:var(--accent)}
 .hint{color:var(--muted);font-size:13px;margin:8px 0}
-#cfg{width:100%;min-height:260px;font-family:ui-monospace,Consolas,monospace;font-size:13px;line-height:1.55;padding:12px;border:1px solid #d7dce5;border-radius:8px;resize:vertical;background:#fbfcfe}
+#cfg{width:100%;min-height:260px;font-family:var(--mono);font-size:12.5px;line-height:1.6;padding:12px;border:1px solid #d7dce5;border-radius:8px;resize:vertical;background:#fbfcfe}
 #cfgMsg{font-size:14px;color:var(--muted)}
 .status-dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:8px;vertical-align:middle}
 .status-ok{background:var(--ok);box-shadow:0 0 6px rgba(22,163,74,.5)}
@@ -1316,7 +1320,7 @@ summary::marker{color:var(--accent)}
 .dropdown-item:hover{background:#f5f8ff}
 .dropdown-item.disabled{opacity:.55;cursor:not-allowed;background:#fafafa}
 .dropdown-item input{margin:0;accent-color:var(--accent);flex:0 0 auto}
-.dropdown-item .domain{font-family:ui-monospace,Consolas,monospace;color:#111827;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.dropdown-item .domain{font-family:var(--mono);color:#111827;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
 .dropdown-item .meta{color:var(--muted);font-size:12px;white-space:nowrap}
 .dropdown-empty{padding:18px 12px;text-align:center;color:var(--muted);font-size:13px}
 .cfg-tabs{display:inline-flex;gap:4px;padding:3px;background:#eef2f7;border-radius:9px;margin:10px 0 14px}
@@ -1344,7 +1348,7 @@ summary::marker{color:var(--accent)}
 .domain-editor{display:flex;flex-direction:column;gap:8px}
 .domain-item{border:1px solid var(--line);border-radius:9px;background:#fff;overflow:hidden}
 .domain-main{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:9px 11px}
-.domain-main .d-name{flex:1 1 240px;min-width:160px;font-family:ui-monospace,Consolas,monospace}
+.domain-main .d-name{flex:1 1 240px;min-width:160px;font-family:var(--mono)}
 .domain-main label{display:flex;align-items:center;gap:6px;font-size:13px;color:#4b5563;white-space:nowrap;cursor:pointer}
 .domain-main input[type=checkbox]{width:15px;height:15px;accent-color:var(--accent);margin:0}
 .domain-adv{display:none;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;padding:10px 11px;border-top:1px dashed var(--line);background:#fafbfe}
@@ -1373,9 +1377,9 @@ summary::marker{color:var(--accent)}
 .modal .result-fail .result-dot{background:#ef4444}
 .modal .result-main{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:4px}
 .modal .result-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
-.modal .result-domain{font-family:ui-monospace,Consolas,monospace;color:var(--text);word-break:break-all;line-height:1.4}
+.modal .result-domain{font-family:var(--mono);color:var(--text);word-break:break-all;line-height:1.4}
 .modal .result-source{font-size:11px;padding:1px 6px;border-radius:8px}
-.modal .result-ips{color:var(--muted);font-size:12px;font-family:ui-monospace,Consolas,monospace;line-height:1.5;word-break:break-all;white-space:normal}
+.modal .result-ips{color:var(--muted);font-size:12px;font-family:var(--mono);line-height:1.5;word-break:break-all;white-space:normal}
 .modal .result-info{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:3px}
 .modal .modal-empty{display:flex;flex-direction:column;align-items:center;gap:10px;padding:28px 16px;color:var(--muted);font-size:13px;text-align:center}
 .modal-actions{display:flex;flex-wrap:wrap;gap:10px;justify-content:flex-end;margin-top:14px;padding-top:14px;border-top:1px solid var(--line);flex:0 0 auto}
@@ -1386,7 +1390,7 @@ summary::marker{color:var(--accent)}
 .group-toggle{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid transparent;border-radius:8px;background:transparent;font-size:14px;font-weight:600;color:#111827}
 .group-toggle:hover{background:#e8eef8;border-color:#d5deec}
 .group-toggle .caret{width:14px;color:var(--accent);font-size:11px;text-align:center}
-.group-name{font-family:ui-monospace,Consolas,monospace}
+.group-name{font-family:var(--mono)}
 .group-count{font-weight:400;color:var(--muted);font-size:13px}
 .group-ok{font-weight:400;color:var(--ok);font-size:13px}
 .group-ok.has-bad{color:#b45309}
@@ -1450,7 +1454,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 .log-tools label{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);cursor:pointer;white-space:nowrap}
 .log-tools input[type=checkbox]{width:15px;height:15px;accent-color:var(--accent);margin:0}
 #logFilter{flex:1 1 240px;min-width:160px}
-#logView{height:340px;overflow:auto;margin:0;padding:12px;background:var(--card);border:1px solid var(--line);border-radius:8px;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;line-height:1.55;white-space:pre-wrap;word-break:break-all;color:var(--text)}
+#logView{height:340px;overflow:auto;margin:0;padding:12px;background:var(--card);border:1px solid var(--line);border-radius:8px;font-family:var(--mono);font-size:12.5px;line-height:1.55;white-space:pre-wrap;word-break:break-all;color:var(--text)}
 #logView .log-line{display:block}
 #logView .log-time{color:var(--muted);margin-right:8px}
 #logState{font-size:13px;color:var(--muted)}
@@ -1475,8 +1479,27 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 (function(){try{var m=localStorage.getItem("ho-theme")||"system";var d=m==="dark"||(m==="system"&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.setAttribute("data-theme",d?"dark":"light");}catch(e){}})();
 </script>
 </head><body>
-<h1>hosts-optimizer</h1>
-<p class="sub">生成于 {{.GeneratedAt}} · 每 {{.ScheduleMinutes}} 分钟轮询 · 有效 {{.ActiveCount}}/{{.DomainCount}} 个域名</p>
+<header class="page-head">
+  <span class="logo" aria-hidden="true">
+    <svg viewBox="0 0 48 48">
+      <defs>
+        <linearGradient id="hoLogoBg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#1e3a8a"/>
+          <stop offset="1" stop-color="#4f46e5"/>
+        </linearGradient>
+      </defs>
+      <rect width="48" height="48" rx="11" fill="url(#hoLogoBg)"/>
+      <circle cx="24" cy="24" r="13" fill="none" stroke="#fff" stroke-width="2"/>
+      <ellipse cx="24" cy="24" rx="6" ry="13" fill="none" stroke="#fff" stroke-width="1.5"/>
+      <line x1="11" y1="24" x2="37" y2="24" stroke="#fff" stroke-width="1.5"/>
+      <path d="M27 14 L20 26 h5 l-3 8 9-13 h-5 z" fill="#22c55e" stroke="#fff" stroke-width="1.2" stroke-linejoin="round"/>
+    </svg>
+  </span>
+  <div>
+    <h1>Hosts 优选订阅</h1>
+    <p class="sub">生成于 {{.GeneratedAt}} · 每 {{.ScheduleMinutes}} 分钟轮询 · 有效 {{.ActiveCount}}/{{.DomainCount}} 个域名</p>
+  </div>
+</header>
 
 <div class="card">
 <div class="bar">
@@ -1698,7 +1721,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 
 <div class="modal-overlay" id="expandModal">
   <div class="modal">
-    <h3>展开域名: <span id="modalDomain" style="font-family:monospace;color:var(--accent)"></span></h3>
+    <h3>展开域名: <span id="modalDomain" style="font-family:var(--mono);color:var(--accent)"></span></h3>
     <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
     <p id="progressText" class="modal-hint">准备中...</p>
     <div class="result-list" id="resultList"></div>
@@ -1711,7 +1734,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 
 <div class="modal-overlay" id="ipModal">
   <div class="modal">
-    <h3>候选 IP 延时: <span id="ipDomain" style="font-family:ui-monospace,Consolas,monospace;color:var(--accent)"></span></h3>
+    <h3>候选 IP 延时: <span id="ipDomain" style="font-family:var(--mono);color:var(--accent)"></span></h3>
     <p class="hint" id="ipHint"></p>
     <div class="result-list" id="ipList"></div>
     <div class="modal-actions">
