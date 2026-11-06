@@ -14,13 +14,15 @@
 
 仓库：<https://github.com/wulinwei959/ip-optimizer>
 
+当前版本：**1.0.9**（版本历史与验证记录见 [`docs/progress.md`](docs/progress.md)）
+
 ---
 
 ## 工作原理
 
 ```
 domains.json
-   ↓ 多源 DNS 采集（手写 UDP 53 报文，无第三方库）
+   ↓ DNS 采集：UDP / DoT / DoH（手写报文，无第三方库）
    ↓ 过滤回环 / 私有 / CGNAT / 保留段
 候选 IP 池
    ↓ TCP 握手测速 ×3 取中位数
@@ -59,7 +61,7 @@ AdGuard Home 订阅
 - **候选延时与手动切换**：点击表格中的延迟数值可查看本轮全部可连接 IP 的延迟，并手动切换当前生效 IP；切换会立即写入状态与订阅产物。
 - **AGH 规则刷新**：「刷新 AGH 规则」按钮只根据当前快照重新生成 `agh.txt`，不重新探测 DNS/TCP；手动刷新选中域名或切换 IP 后也会自动同步订阅文件。
 - **异步刷新**：`POST /refresh` 立即返回 `task_id` 并在后台执行，页面轮询 `/api/refresh-status` 显示进度，长时间探测不再阻塞请求。
-- **fnOS 桌面入口**：桌面图标以 iframe 窗口打开状态页，可查看生效 IP / 延迟、一键复制订阅地址、点「立即刷新」触发新一轮；表格支持勾选与批量删除。
+- **fnOS 桌面入口**：桌面图标以 iframe 窗口打开状态页，可查看生效 IP / 延迟、复制订阅地址、刷新选中域名或单独重写 AGH 规则；表格支持勾选与批量操作。
 
 ---
 
@@ -157,7 +159,7 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 | `HO_TZ` | `Asia/Shanghai` | 时区，静态二进制自带 tzdata，不依赖宿主 `/usr/share/zoneinfo` |
 | `HO_CA_BUNDLE` | 空 | 可选 CA 证书文件；**文件不存在时降级为仅用系统证书池，不是致命错误** |
 | `HO_SCHEDULE_MINUTES` | — | 覆盖 `defaults.schedule_minutes` |
-| `HO_PROBE_DNS` | — | 覆盖上游 DNS，逗号分隔的字面 IP |
+| `HO_PROBE_DNS` | — | 覆盖上游 DNS，逗号分隔；UDP 用字面 IP，也可写 `tls://` / `https://` |
 | `HO_PROBE_CONCURRENCY` | — | 覆盖 `defaults.concurrency` |
 
 ### `domains.json`
@@ -187,7 +189,7 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 
 | 路径 | 说明 |
 | --- | --- |
-| `/` | 概览页：状态表格、复制订阅地址、立即刷新 |
+| `/` | 概览页：状态表格、复制订阅地址、批量刷新、候选 IP 切换、历史与日志 |
 | `/hosts.txt` | `IP domain` 逐行，`/etc/hosts` 语法 |
 | `/agh.txt` | `\|\|domain^$dnsrewrite=NOERROR;A;IP`，推荐 |
 | `/status.json` | 每域名候选数、通过数、生效 IP、延迟、切换原因、本轮时间 |
@@ -281,11 +283,10 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 
 **待验证 / 已知限制**
 
-- 桌面图标入口（本轮新补）的真机显示效果尚未确认；覆盖安装后可能需要重启 `trim_app_center.service`。
-- 尚未在真实 AdGuard Home 实例中验证订阅解析与规则生效；当前只验证了订阅端点内容与 HTTP 语义。
+- 桌面入口在 fnOS 桌面内的实际显示仍需人工确认；覆盖安装后可能需要重启 `trim_app_center.service`。
+- AdGuard Home 订阅已接入测试环境，长期自动更新与不同客户端的解析表现仍需持续观察。
 - 真实公网域名下的一周 IP 抖动、滞回表现与多源 DNS 并集质量未长期观测。
 - 刷新任务保存在进程内存：服务重启后状态丢失（不影响已落盘产物），重新触发即可。
-- 图标是占位图（尺寸合规但很素），发布前建议替换。
 - A / B 轨道未验证；`config/resource` 的 `data-share` 共享目录编辑方案未启用。
 - `x509.SystemCertPool()` 在个别精简 fnOS 版本可能读不到系统 CA，此时需随包 `ca-bundle.crt`。
 
@@ -309,6 +310,8 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 | --- | --- |
 | [`deploy/README.md`](deploy/README.md) | 部署适配层：三形态取舍、接口契约、构建细节 |
 | [`deploy/config-schema/README.md`](deploy/config-schema/README.md) | `domains.json` 全字段表、HTTP 端点、IPv6 结论 |
+| [`docs/technical.md`](docs/technical.md) | 技术文档：架构、数据模型、API、并发、构建与扩展 |
+| [`docs/progress.md`](docs/progress.md) | 项目进度：版本历史、功能矩阵、验证记录、路线图 |
 | [`research/2026-11-05-nas-hosts-ip-optimizer.md`](research/2026-11-05-nas-hosts-ip-optimizer.md) | 需求与开源复用调研（2026-11-05 快照） |
 | [`research/2026-11-05-fnos-dual-deployment.md`](research/2026-11-05-fnos-dual-deployment.md) | fnOS FPK 契约核查、验收清单、方案决策 |
 

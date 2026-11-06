@@ -92,7 +92,7 @@ SKIP_PACK=1 ./../deploy/scripts/build-native-fpk.sh x86   # 或 .ps1 验证跨�
 | **离线构建** | `GOPROXY=off`，CI/构建机无网络依赖 |
 | **静态二进制** | `CGO_ENABLED=0`，无 glibc 以外动态依赖 |
 | **非 root 运行** | `run-as=package`，仅 TCP/TLS 端口，**禁 ICMP** |
-| **DNS 必须是 IP** | `probe_dns` 仅接受字面 IPv4，拒绝域名避免递归污染 |
+| **UDP 上游必须是 IP** | `probe_dns` 的 UDP 上游仅接受字面 IP；DoT/DoH 允许主机名并由 TLS 校验 |
 | **CA 降级不报错** | 优先 `x509.SystemCertPool()`，缺 `ca-bundle.crt` 只警告继续 |
 | **原子写** | 临时文件 + `sync` + `Rename`，防止读到半截文件 |
 | **配置热加载** | 每轮重读 `domains.json`，修改即生效无需重启 |
@@ -103,6 +103,8 @@ SKIP_PACK=1 ./../deploy/scripts/build-native-fpk.sh x86   # 或 .ps1 验证跨�
 
 ## 文档维护
 - `README.md`：项目总览、快速开始、三通道对比
+- `docs/technical.md`：架构、数据模型、API、并发与扩展
+- `docs/progress.md`：版本历史、功能矩阵、验证记录与路线图
 - `deploy/README.md`：构建部署细节、环境变量、schema
 - `deploy/config-schema/README.md`：`domains.json` 完整字段说明
 - `research/`：调研记录，**不可作为现状参考**，以核心代码与部署文档为准

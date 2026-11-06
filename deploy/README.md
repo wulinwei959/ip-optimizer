@@ -2,6 +2,8 @@
 
 本目录只解决**部署与分发**，不含业务核心实现。
 
+当前版本 **1.0.9**；技术实现见 [`docs/technical.md`](../docs/technical.md)，版本历史与验证记录见 [`docs/progress.md`](../docs/progress.md)。
+
 ## 当前取舍：主轨 = fnOS 纯原生 FPK
 
 | 目录 | 形态 | 状态 |
@@ -16,7 +18,7 @@
 
 ## 核心工程的技术约束（决定能否真的离线）
 
-- **Go + 仅标准库**：`net/http`（单端口服务）、`crypto/tls`（SNI 证书校验）、`encoding/json`（配置）、`net`（自定义 DNS 查询，可手写 UDP 53 报文或用纯 Go `net.Resolver`）、`time.Ticker`（进程内定时）、`os.Rename`（原子写）。全部标准库，无 `go mod download`。
+- **Go + 仅标准库**：`net/http`（单端口服务）、`crypto/tls`（SNI 证书校验 / DoT）、`encoding/json`（配置）、`net`（自定义 DNS 查询：UDP / DoT / DoH，手写报文）、`time.Ticker`（进程内定时）、`os.Rename`（原子写）。全部标准库，无 `go mod download`。
 - **唯一一次性联网**：在本机装 Go SDK（单个安装包）。之后所有构建离线；`build-native-fpk.sh` 设 `GOPROXY=off GOSUMDB=off`，一旦误引入第三方依赖会**直接构建失败**而不是偷偷联网。
 - **交叉编译**：Windows 上 `GOOS=linux GOARCH=amd64|arm64 CGO_ENABLED=0 go build` 直接产出 Linux 静态 ELF，不需要 Linux 机器、Docker daemon、基础镜像。
 - **CA 根证书**：静态二进制不自带系统信任库。核心优先 `x509.SystemCertPool()`（fnOS 为 Debian 系，一般可用）；`HO_CA_BUNDLE` 指向的随包 `ca-bundle.crt` 为可选增强（放到 `deploy/ca-bundle.crt` 即会被构建脚本带入包）。**文件不存在时仅告警并降级为系统证书池，不致命退出** —— 早期把它当致命错误处理，曾导致 `Restart=always` 无限重启。
@@ -36,7 +38,7 @@ Linux / macOS / Git Bash：
 SKIP_PACK=1 ./deploy/scripts/build-native-fpk.sh x86   # 只编译，不调 fnpack
 ./deploy/scripts/build-native-fpk.sh x86
 ./deploy/scripts/build-native-fpk.sh arm
-# → deploy/dist/hosts-optimizer-native-1.0.1-x86.fpk / -arm.fpk
+# → deploy/dist/hosts-optimizer-native-1.0.9-x86.fpk / -arm.fpk
 ```
 
 Windows PowerShell（开发机没有 bash / pwsh 时用这份等价脚本；脚本为纯 ASCII，规避中文 GBK/UTF-8 编码问题）：
