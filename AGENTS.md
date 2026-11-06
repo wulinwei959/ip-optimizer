@@ -31,3 +31,8 @@
 - 改动 workflow 后本地先运行 actionlint 校验，再推送。
 - `.github/workflows/ci.yml` 必须保持无 BOM、LF 行尾。
 
+## 测试设备
+
+- 仅有 x86 设备，测试与打包只做 x86 架构。
+- arm64 产物仍需在 CI 中交叉编译验证，但不在真机安装测试。
+
