@@ -634,7 +634,7 @@ button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
 button.primary:hover{background:var(--accent-dark);border-color:var(--accent-dark)}
 button.danger{background:#fff;color:var(--danger);border-color:#f0b4b4}
 button.danger:hover{background:#fef2f2;border-color:var(--danger)}
-input[type=text],select{padding:8px 11px;border:1px solid #d7dce5;border-radius:8px;font-size:13px;font-family:inherit;background:#fff;color:var(--text)}
+input[type=text],input[type=number],select{padding:8px 11px;border:1px solid #d7dce5;border-radius:8px;font-size:13px;font-family:inherit;background:#fff;color:var(--text)}
 #sub{flex:1 1 320px;min-width:200px;font-family:ui-monospace,Consolas,monospace}
 #msg{font-size:14px;color:var(--muted);min-width:180px}
 #search{flex:1 1 240px;min-width:180px}
@@ -674,6 +674,33 @@ summary::marker{color:var(--accent)}
 .dropdown-item .domain{font-family:ui-monospace,Consolas,monospace;color:#111827;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
 .dropdown-item .meta{color:var(--muted);font-size:12px;white-space:nowrap}
 .dropdown-empty{padding:18px 12px;text-align:center;color:var(--muted);font-size:13px}
+.cfg-tabs{display:inline-flex;gap:4px;padding:3px;background:#eef2f7;border-radius:9px;margin:10px 0 14px}
+.cfg-tabs button{border:none;background:transparent;padding:6px 14px;font-size:13px;border-radius:7px}
+.cfg-tabs button.active{background:#fff;color:var(--accent);box-shadow:0 1px 3px rgba(16,24,40,.12)}
+.cfg-form{display:none}
+.cfg-form.active{display:block}
+.cfg-json-wrap{display:none}
+.cfg-json-wrap.active{display:block}
+.cfg-section{border:1px solid var(--line);border-radius:10px;padding:12px 14px 14px;margin:0 0 12px}
+.cfg-section legend{padding:0 6px;font-size:13px;font-weight:600;color:#374151}
+.field-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+.field-grid label{display:flex;flex-direction:column;gap:5px;font-size:13px;color:#4b5563}
+.field-grid label.wide{grid-column:1/-1}
+.field-grid input[type=text],.field-grid input[type=number]{width:100%}
+.checks{display:flex;flex-wrap:wrap;gap:14px;padding:6px 0}
+.checks label{flex-direction:row;align-items:center;gap:6px;font-size:13px;color:#374151;cursor:pointer}
+.checks input{accent-color:var(--accent)}
+.domain-editor{display:flex;flex-direction:column;gap:8px}
+.domain-item{border:1px solid var(--line);border-radius:9px;background:#fff;overflow:hidden}
+.domain-main{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:9px 11px}
+.domain-main .d-name{flex:1 1 240px;min-width:160px;font-family:ui-monospace,Consolas,monospace}
+.domain-main label{display:flex;align-items:center;gap:6px;font-size:13px;color:#4b5563;white-space:nowrap;cursor:pointer}
+.domain-main input[type=checkbox]{width:15px;height:15px;accent-color:var(--accent);margin:0}
+.domain-adv{display:none;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;padding:10px 11px;border-top:1px dashed var(--line);background:#fafbfe}
+.domain-item.open .domain-adv{display:grid}
+.domain-adv label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+.domain-adv input{width:100%}
+.domain-empty{color:var(--muted);font-size:13px;padding:6px 2px;margin:0}
 .table-tools{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:10px}
 .table-tools .left{display:flex;gap:10px;align-items:center}
 #selCount{font-size:13px;color:var(--muted)}
@@ -697,9 +724,20 @@ summary::marker{color:var(--accent)}
 .modal .result-ips{color:var(--muted);font-size:12px;font-family:ui-monospace,Consolas,monospace}
 .modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:16px;padding-top:16px;border-top:1px solid var(--line)}
 .table-row-hidden{display:none}
-.pagination{display:flex;gap:6px;justify-content:center;margin-top:16px}
-.pagination button{padding:5px 12px;font-size:13px}
-.pagination button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+.group-row td{background:#f7f9fc;padding:0}
+.group-row.open td{background:#eff4fb}
+.group-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 12px}
+.group-toggle{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid transparent;border-radius:8px;background:transparent;font-size:14px;font-weight:600;color:#111827}
+.group-toggle:hover{background:#e8eef8;border-color:#d5deec}
+.group-toggle .caret{width:14px;color:var(--accent);font-size:11px;text-align:center}
+.group-name{font-family:ui-monospace,Consolas,monospace}
+.group-count{font-weight:400;color:var(--muted);font-size:13px}
+.group-ok{font-weight:400;color:var(--ok);font-size:13px}
+.group-ok.has-bad{color:#b45309}
+.group-select{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);cursor:pointer;white-space:nowrap}
+.group-select input{width:15px;height:15px;accent-color:var(--accent);margin:0}
+tr.domain-row td{background:#fff}
+tr.domain-row td:nth-child(2){padding-left:32px}
 @media (max-width:768px){
   body{padding:18px 12px 40px}
   h1{font-size:24px}
@@ -753,14 +791,67 @@ summary::marker{color:var(--accent)}
   </div>
   <p class="hint" id="discoverMsg">输入主域名后会从 CT 日志、字典与规则中发现相关子域名；勾选后点「添加」写入下方配置，再点「保存并生效」。</p>
 </div>
-<p class="hint">保存前会校验：JSON 格式、域名合法、probe_dns 必须为字面 IP 等。配置会被固化且<strong>不会覆盖</strong>原文件；保存后点「生效」触发新一轮生成。</p>
+<div class="cfg-tabs">
+  <button id="tabForm" type="button" class="active">图形化</button>
+  <button id="tabJSON" type="button">JSON 源码</button>
+</div>
+
+<div id="cfgForm" class="cfg-form active">
+  <fieldset class="cfg-section">
+    <legend>定时与探测</legend>
+    <div class="field-grid">
+      <label>轮询周期（分钟）<input id="fSchedule" type="number" min="1"></label>
+      <label>探测端口<input id="fPort" type="number" min="1" max="65535"></label>
+      <label>并发数<input id="fConcurrency" type="number" min="1"></label>
+      <label>最大候选 IP 数<input id="fMaxCandidates" type="number" min="1"></label>
+      <label>TCP 探测轮数<input id="fTCPRounds" type="number" min="1"></label>
+      <label>单次超时（秒）<input id="fTimeout" type="number" min="1"></label>
+    </div>
+  </fieldset>
+  <fieldset class="cfg-section">
+    <legend>DNS 与切换策略</legend>
+    <div class="field-grid">
+      <label class="wide">探测 DNS（逗号分隔）<input id="fProbeDNS" type="text" placeholder="223.5.5.5, 119.29.29.29"></label>
+      <label>滞回百分比（%）<input id="fHystPct" type="number" min="0"></label>
+      <label>滞回轮数<input id="fHystRounds" type="number" min="1"></label>
+    </div>
+  </fieldset>
+  <fieldset class="cfg-section">
+    <legend>子域名展开</legend>
+    <div class="field-grid">
+      <label class="wide">默认展开来源
+        <span class="checks">
+          <label><input type="checkbox" id="fSrcCT" value="ct"> CT 日志</label>
+          <label><input type="checkbox" id="fSrcWL" value="wordlist"> 字典</label>
+          <label><input type="checkbox" id="fSrcRules" value="rules"> 规则</label>
+        </span>
+      </label>
+      <label>展开并发<input id="fExpandConcurrency" type="number" min="1"></label>
+      <label>展开超时（秒）<input id="fExpandTimeout" type="number" min="1"></label>
+      <label>最多子域名<input id="fExpandMax" type="number" min="1"></label>
+    </div>
+  </fieldset>
+  <fieldset class="cfg-section">
+    <legend>域名列表</legend>
+    <div id="domainEditor" class="domain-editor"></div>
+    <div class="bar" style="margin-top:10px">
+      <input id="newDomainName" type="text" placeholder="新增域名，如 example.com" spellcheck="false">
+      <button id="addDomainBtn" type="button">添加域名</button>
+    </div>
+  </fieldset>
+</div>
+
+<div id="cfgJSONWrap" class="cfg-json-wrap">
+  <textarea id="cfg" spellcheck="false"></textarea>
+</div>
+
+<p class="hint">保存前会校验：JSON 格式、域名合法、probe_dns 必须为字面 IP 等。配置会被固化且<strong>不会覆盖</strong>原文件；保存后点「保存并生效」触发新一轮生成。</p>
 <div class="bar">
 <button id="cfgLoad" type="button">重新加载</button>
 <button id="cfgSave" type="button">保存</button>
 <button id="cfgSaveRun" type="button" class="primary">保存并生效</button>
 <span id="cfgMsg"></span>
 </div>
-<textarea id="cfg" spellcheck="false"></textarea>
 </details>
 </div>
 
@@ -769,8 +860,10 @@ summary::marker{color:var(--accent)}
   <div class="left">
     <span id="selCount">已选 0 个域名</span>
     <button id="batchDelete" type="button" class="danger" disabled>删除选中</button>
+    <button id="expandAll" type="button">全部展开</button>
+    <button id="collapseAll" type="button">全部收起</button>
   </div>
-  <span class="hint" style="margin:0">勾选后可批量从配置中删除，保存后生效</span>
+  <span class="hint" style="margin:0">按主域名分组；点分组标题展开该分类，勾选后可批量删除</span>
 </div>
 <table><thead>
 <tr>
@@ -803,7 +896,6 @@ summary::marker{color:var(--accent)}
 {{end}}
 </tbody></table>
 
-<div class="pagination" id="pagination"></div>
 </div>
 
 <div class="modal-overlay" id="expandModal">
@@ -877,17 +969,250 @@ summary::marker{color:var(--accent)}
 
   var cfg = document.getElementById("cfg");
   var cfgMsg = document.getElementById("cfgMsg");
+  var cfgTab = "form";
+  var cfgFormEl = document.getElementById("cfgForm");
+  var cfgJSONWrap = document.getElementById("cfgJSONWrap");
+  var tabFormBtn = document.getElementById("tabForm");
+  var tabJSONBtn = document.getElementById("tabJSON");
+  var domainEditor = document.getElementById("domainEditor");
+
+  function splitList(v) {
+    return String(v || "").split(/[,，\s]+/).map(function (s) { return s.trim(); })
+      .filter(function (s) { return s.length > 0; });
+  }
+  function setNum(obj, key, el, fallback) {
+    var raw = el.value.trim();
+    var n = raw === "" ? NaN : parseInt(raw, 10);
+    obj[key] = isNaN(n) ? fallback : n;
+  }
+  function numTo(el, v, fallback) {
+    el.value = String((v === undefined || v === null || v === "") ? fallback : v);
+  }
+  function advField(labelText, cls, value, type) {
+    var label = document.createElement("label");
+    label.appendChild(document.createTextNode(labelText));
+    var input = document.createElement("input");
+    input.type = type || "text";
+    input.className = cls;
+    input.value = value;
+    label.appendChild(input);
+    return label;
+  }
+  function buildDomainRow(d) {
+    var item = document.createElement("div");
+    item.className = "domain-item";
+    item._src = d;
+
+    var main = document.createElement("div");
+    main.className = "domain-main";
+    var name = document.createElement("input");
+    name.type = "text";
+    name.className = "d-name";
+    name.value = d.name || "";
+    name.placeholder = "example.com";
+    name.spellcheck = false;
+
+    var expandLabel = document.createElement("label");
+    var expand = document.createElement("input");
+    expand.type = "checkbox";
+    expand.className = "d-expand";
+    expand.checked = !!d.expand;
+    expandLabel.appendChild(expand);
+    expandLabel.appendChild(document.createTextNode(" 展开子域名"));
+
+    var advBtn = document.createElement("button");
+    advBtn.type = "button";
+    advBtn.textContent = "高级";
+    advBtn.onclick = function () { item.classList.toggle("open"); };
+
+    var delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "danger";
+    delBtn.textContent = "删除";
+    delBtn.onclick = function () { item.remove(); };
+
+    main.appendChild(name);
+    main.appendChild(expandLabel);
+    main.appendChild(advBtn);
+    main.appendChild(delBtn);
+
+    var adv = document.createElement("div");
+    adv.className = "domain-adv";
+    adv.appendChild(advField("SNI（留空同域名）", "d-sni", d.sni || ""));
+    adv.appendChild(advField("端口（留空用默认）", "d-port", d.port ? String(d.port) : "", "number"));
+    adv.appendChild(advField("候选 IP（逗号分隔）", "d-cands", (d.candidates || []).join(", ")));
+    adv.appendChild(advField("展开来源（ct/wordlist/rules）", "d-sources", (d.expand_sources || []).join(", ")));
+
+    item.appendChild(main);
+    item.appendChild(adv);
+    return item;
+  }
+  function fillForm(raw) {
+    var obj;
+    try {
+      obj = JSON.parse(raw || "{}");
+    } catch (e) {
+      cfgMsg.textContent = "JSON 解析失败，请先在 JSON 模式修正: " + e.message;
+      return false;
+    }
+    var d = obj.defaults || {};
+    numTo(document.getElementById("fSchedule"), d.schedule_minutes, 60);
+    numTo(document.getElementById("fPort"), d.probe_port, 443);
+    numTo(document.getElementById("fConcurrency"), d.concurrency, 20);
+    numTo(document.getElementById("fMaxCandidates"), d.max_candidates, 64);
+    numTo(document.getElementById("fTCPRounds"), d.tcp_rounds, 3);
+    numTo(document.getElementById("fTimeout"), d.timeout_seconds, 3);
+    numTo(document.getElementById("fHystPct"), d.hysteresis_percent, 0);
+    numTo(document.getElementById("fHystRounds"), d.hysteresis_rounds, 2);
+    numTo(document.getElementById("fExpandConcurrency"), d.expand_concurrency, 10);
+    numTo(document.getElementById("fExpandTimeout"), d.expand_timeout_seconds, 10);
+    numTo(document.getElementById("fExpandMax"), d.expand_max_subdomains, 50);
+    var dnsList = (d.probe_dns && d.probe_dns.length) ? d.probe_dns : ["223.5.5.5", "119.29.29.29"];
+    document.getElementById("fProbeDNS").value = dnsList.join(", ");
+    var srcs = (d.expand_sources && d.expand_sources.length) ? d.expand_sources : ["wordlist", "rules"];
+    document.getElementById("fSrcCT").checked = srcs.indexOf("ct") >= 0;
+    document.getElementById("fSrcWL").checked = srcs.indexOf("wordlist") >= 0;
+    document.getElementById("fSrcRules").checked = srcs.indexOf("rules") >= 0;
+
+    domainEditor.innerHTML = "";
+    var list = Array.isArray(obj.domains) ? obj.domains : [];
+    list.forEach(function (dom) {
+      if (!dom || !dom.name) return;
+      var copy = {};
+      Object.keys(dom).forEach(function (k) { copy[k] = dom[k]; });
+      domainEditor.appendChild(buildDomainRow(copy));
+    });
+    if (domainEditor.children.length === 0) {
+      var empty = document.createElement("p");
+      empty.className = "domain-empty";
+      empty.textContent = "还没有域名，可在下方新增，或用上方「获取域名列表」批量添加";
+      domainEditor.appendChild(empty);
+    }
+    return true;
+  }
+  function formToConfig() {
+    var obj;
+    try {
+      obj = JSON.parse(cfg.value || "{}");
+    } catch (e) {
+      throw new Error("JSON 源码有误，请先切到 JSON 模式修正: " + e.message);
+    }
+    if (!obj.defaults) obj.defaults = {};
+    var d = obj.defaults;
+    setNum(d, "schedule_minutes", document.getElementById("fSchedule"), 60);
+    setNum(d, "probe_port", document.getElementById("fPort"), 443);
+    setNum(d, "concurrency", document.getElementById("fConcurrency"), 20);
+    setNum(d, "max_candidates", document.getElementById("fMaxCandidates"), 64);
+    setNum(d, "tcp_rounds", document.getElementById("fTCPRounds"), 3);
+    setNum(d, "timeout_seconds", document.getElementById("fTimeout"), 3);
+    setNum(d, "hysteresis_percent", document.getElementById("fHystPct"), 0);
+    setNum(d, "hysteresis_rounds", document.getElementById("fHystRounds"), 2);
+    setNum(d, "expand_concurrency", document.getElementById("fExpandConcurrency"), 10);
+    setNum(d, "expand_timeout_seconds", document.getElementById("fExpandTimeout"), 10);
+    setNum(d, "expand_max_subdomains", document.getElementById("fExpandMax"), 50);
+    var dns = splitList(document.getElementById("fProbeDNS").value);
+    d.probe_dns = dns.length ? dns : ["223.5.5.5", "119.29.29.29"];
+    var srcs = [];
+    if (document.getElementById("fSrcCT").checked) srcs.push("ct");
+    if (document.getElementById("fSrcWL").checked) srcs.push("wordlist");
+    if (document.getElementById("fSrcRules").checked) srcs.push("rules");
+    d.expand_sources = srcs.length ? srcs : ["wordlist", "rules"];
+
+    var domains = [];
+    Array.prototype.forEach.call(domainEditor.querySelectorAll(".domain-item"), function (item) {
+      var src = item._src || {};
+      var base = {};
+      Object.keys(src).forEach(function (k) { base[k] = src[k]; });
+      var name = item.querySelector(".d-name").value.trim().toLowerCase();
+      if (!name) return;
+      base.name = name;
+      base.expand = item.querySelector(".d-expand").checked;
+      var sni = item.querySelector(".d-sni").value.trim();
+      if (sni) base.sni = sni; else delete base.sni;
+      var port = item.querySelector(".d-port").value.trim();
+      if (port) {
+        var p = parseInt(port, 10);
+        if (!isNaN(p)) base.port = p;
+      } else {
+        delete base.port;
+      }
+      var cands = splitList(item.querySelector(".d-cands").value);
+      if (cands.length) base.candidates = cands; else delete base.candidates;
+      var es = splitList(item.querySelector(".d-sources").value);
+      if (es.length) base.expand_sources = es; else delete base.expand_sources;
+      domains.push(base);
+    });
+    obj.domains = domains;
+    cfg.value = JSON.stringify(obj, null, 2);
+  }
+  function syncFormIfNeeded() {
+    if (cfgTab === "form") formToConfig();
+  }
+  function setTab(tab) {
+    if (tab === cfgTab) return;
+    if (tab === "json") {
+      try {
+        formToConfig();
+      } catch (e) {
+        cfgMsg.textContent = e.message;
+        return;
+      }
+    } else if (!fillForm(cfg.value)) {
+      return;
+    }
+    cfgTab = tab;
+    var isForm = tab === "form";
+    cfgFormEl.classList.toggle("active", isForm);
+    cfgJSONWrap.classList.toggle("active", !isForm);
+    tabFormBtn.classList.toggle("active", isForm);
+    tabJSONBtn.classList.toggle("active", !isForm);
+    cfgMsg.textContent = "";
+  }
+  tabFormBtn.onclick = function () { setTab("form"); };
+  tabJSONBtn.onclick = function () { setTab("json"); };
+
+  document.getElementById("addDomainBtn").onclick = function () {
+    var input = document.getElementById("newDomainName");
+    var name = input.value.trim().toLowerCase();
+    if (!name) { input.focus(); return; }
+    var empty = domainEditor.querySelector(".domain-empty");
+    if (empty) empty.remove();
+    var item = buildDomainRow({ name: name, expand: false });
+    domainEditor.appendChild(item);
+    input.value = "";
+    item.scrollIntoView({ block: "nearest" });
+  };
+  document.getElementById("newDomainName").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      document.getElementById("addDomainBtn").click();
+    }
+  });
+
   function loadCfg() {
     cfgMsg.textContent = "加载中...";
     fetch("/api/domains")
       .then(function (r) { return r.json(); })
       .then(function (j) {
-        if (j.ok) { cfg.value = j.raw; cfgMsg.textContent = ""; }
-        else { cfgMsg.textContent = "加载失败: " + (j.error || "未知错误"); }
+        if (j.ok) {
+          cfg.value = j.raw;
+          cfgMsg.textContent = "";
+          if (cfgTab === "form") fillForm(j.raw);
+        } else {
+          cfgMsg.textContent = "加载失败: " + (j.error || "未知错误");
+        }
       })
       .catch(function (e) { cfgMsg.textContent = "加载失败: " + e; });
   }
   function saveCfg(thenRun) {
+    if (cfgTab === "form") {
+      try {
+        formToConfig();
+      } catch (e) {
+        cfgMsg.textContent = e.message;
+        return;
+      }
+    }
     cfgMsg.textContent = "保存中...";
     fetch("/api/domains", {
       method: "PUT",
@@ -1045,6 +1370,12 @@ summary::marker{color:var(--accent)}
   discoverAdd.onclick = function () {
     var names = checkedDomains();
     if (names.length === 0) return;
+    try {
+      syncFormIfNeeded();
+    } catch (e) {
+      discoverMsg.textContent = e.message;
+      return;
+    }
     var cfgObj;
     try {
       cfgObj = JSON.parse(cfg.value);
@@ -1064,6 +1395,7 @@ summary::marker{color:var(--accent)}
     });
     if (added > 0) {
       cfg.value = JSON.stringify(cfgObj, null, 2);
+      if (cfgTab === "form") fillForm(cfg.value);
       discoverMsg.textContent = "已添加 " + added + " 个域名到配置，请点下方「保存并生效」写入";
       cfgMsg.textContent = "待保存：" + added + " 个新域名";
       openDropdown(false);
@@ -1072,71 +1404,151 @@ summary::marker{color:var(--accent)}
     }
   };
 
-  // 搜索筛选
+  // 按主域名分组：点击分组标题展开该分类下的全部域名
   var searchInput = document.getElementById("search");
   var statusFilter = document.getElementById("statusFilter");
-  var rows = document.querySelectorAll("tbody tr");
-  var pagination = document.getElementById("pagination");
-  var currentPage = 1;
-  var pageSize = 20;
+  var tbody = document.querySelector("tbody");
+  var rows = Array.prototype.slice.call(tbody.querySelectorAll("tr"));
   var filteredRows = [];
+  var groups = [];
+  var multiSuffix = {
+    "com.cn": 1, "net.cn": 1, "org.cn": 1, "gov.cn": 1, "edu.cn": 1,
+    "co.uk": 1, "org.uk": 1, "ac.uk": 1,
+    "com.hk": 1, "com.tw": 1, "com.sg": 1, "com.au": 1, "com.br": 1,
+    "co.jp": 1, "co.kr": 1, "co.in": 1, "co.nz": 1, "co.za": 1,
+    "com.ru": 1, "com.mx": 1
+  };
 
-  function filterRows() {
+  function baseDomain(name) {
+    var parts = String(name || "").toLowerCase().split(".").filter(Boolean);
+    if (parts.length <= 2) return parts.join(".");
+    var lastTwo = parts.slice(-2).join(".");
+    if (multiSuffix[lastTwo]) return parts.slice(-3).join(".");
+    return lastTwo;
+  }
+
+  function buildGroups() {
+    var map = {};
+    rows.forEach(function (tr) {
+      var base = baseDomain(tr.dataset.name);
+      if (!map[base]) {
+        map[base] = { base: base, rows: [], open: false, visible: [] };
+        groups.push(map[base]);
+      }
+      map[base].rows.push(tr);
+    });
+    groups.sort(function (a, b) { return a.base < b.base ? -1 : (a.base > b.base ? 1 : 0); });
+    tbody.innerHTML = "";
+    groups.forEach(function (g) {
+      g.rows.sort(function (a, b) {
+        return a.dataset.name < b.dataset.name ? -1 : (a.dataset.name > b.dataset.name ? 1 : 0);
+      });
+      var head = document.createElement("tr");
+      head.className = "group-row";
+      var cell = document.createElement("td");
+      cell.colSpan = 7;
+      var wrap = document.createElement("div");
+      wrap.className = "group-head";
+
+      var toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "group-toggle";
+      var caret = document.createElement("span");
+      caret.className = "caret";
+      caret.textContent = "▶";
+      var groupName = document.createElement("span");
+      groupName.className = "group-name";
+      groupName.textContent = g.base;
+      var count = document.createElement("span");
+      count.className = "group-count";
+      var ok = document.createElement("span");
+      ok.className = "group-ok";
+      toggle.appendChild(caret);
+      toggle.appendChild(groupName);
+      toggle.appendChild(count);
+      toggle.appendChild(ok);
+
+      var selectLabel = document.createElement("label");
+      selectLabel.className = "group-select";
+      var groupCheck = document.createElement("input");
+      groupCheck.type = "checkbox";
+      selectLabel.appendChild(groupCheck);
+      selectLabel.appendChild(document.createTextNode(" 全选本组"));
+
+      wrap.appendChild(toggle);
+      wrap.appendChild(selectLabel);
+      cell.appendChild(wrap);
+      head.appendChild(cell);
+      tbody.appendChild(head);
+      g.rows.forEach(function (tr) {
+        tr.classList.add("domain-row", "table-row-hidden");
+        tbody.appendChild(tr);
+      });
+
+      g.head = head;
+      g.caret = caret;
+      g.count = count;
+      g.ok = ok;
+      g.check = groupCheck;
+
+      toggle.onclick = function () {
+        g.open = !g.open;
+        head.classList.toggle("open", g.open);
+        caret.textContent = g.open ? "▼" : "▶";
+        applyFilter();
+      };
+      groupCheck.onchange = function () {
+        g.visible.forEach(function (tr) {
+          var c = tr.querySelector(".row-check");
+          if (c) c.checked = groupCheck.checked;
+        });
+        updateSelection();
+      };
+    });
+  }
+
+  function applyFilter() {
     var kw = searchInput.value.trim().toLowerCase();
     var st = statusFilter.value;
-    var visible = [];
-    rows.forEach(function(tr) {
-      var name = tr.dataset.name.toLowerCase();
-      var ip = tr.dataset.ip.toLowerCase();
-      var reason = tr.dataset.reason.toLowerCase();
-      var validated = tr.dataset.status === "true";
-      var match = !kw || name.indexOf(kw) >= 0 || ip.indexOf(kw) >= 0 || reason.indexOf(kw) >= 0;
-      var statusMatch = st === "all" || (st === "ok" && validated) || (st === "fail" && !validated);
-      if (match && statusMatch) visible.push(tr);
+    filteredRows = [];
+    groups.forEach(function (g) {
+      var visible = g.rows.filter(function (tr) {
+        var name = (tr.dataset.name || "").toLowerCase();
+        var ip = (tr.dataset.ip || "").toLowerCase();
+        var reason = (tr.dataset.reason || "").toLowerCase();
+        var validated = tr.dataset.status === "true";
+        var match = !kw || name.indexOf(kw) >= 0 || ip.indexOf(kw) >= 0 || reason.indexOf(kw) >= 0;
+        var statusMatch = st === "all" || (st === "ok" && validated) || (st === "fail" && !validated);
+        return match && statusMatch;
+      });
+      g.visible = visible;
+      filteredRows = filteredRows.concat(visible);
+      g.head.classList.toggle("table-row-hidden", visible.length === 0);
+      if (kw && visible.length > 0) {
+        g.open = true;
+        g.head.classList.add("open");
+        g.caret.textContent = "▼";
+      }
+      g.rows.forEach(function (tr) {
+        tr.classList.toggle("table-row-hidden", !g.open || visible.indexOf(tr) < 0);
+      });
+      var okCount = visible.filter(function (tr) { return tr.dataset.status === "true"; }).length;
+      g.count.textContent = visible.length + " 个域名";
+      g.ok.textContent = okCount + " 正常";
+      g.ok.className = "group-ok" + (visible.length - okCount > 0 ? " has-bad" : "");
     });
-    filteredRows = visible;
-    renderPagination(visible);
     updateSelection();
   }
-  function renderPagination(visible) {
-    var total = visible.length;
-    var totalPages = Math.max(1, Math.ceil(total / pageSize));
-    if (currentPage > totalPages) currentPage = totalPages;
-    var start = (currentPage - 1) * pageSize;
-    var end = start + pageSize;
-    rows.forEach(function(tr) { tr.classList.add("table-row-hidden"); });
-    visible.slice(start, end).forEach(function(tr) { tr.classList.remove("table-row-hidden"); });
-    pagination.innerHTML = "";
-    if (totalPages <= 1) return;
-    var prevBtn = document.createElement("button");
-    prevBtn.textContent = "上一页";
-    prevBtn.disabled = currentPage === 1;
-    prevBtn.onclick = function() { currentPage--; filterRows(); };
-    pagination.appendChild(prevBtn);
-    var maxShow = 5;
-    var startPage = Math.max(1, currentPage - Math.floor(maxShow/2));
-    var endPage = Math.min(totalPages, startPage + maxShow - 1);
-    if (endPage - startPage + 1 < maxShow) startPage = Math.max(1, endPage - maxShow + 1);
-    for (var p = startPage; p <= endPage; p++) {
-      var btn = document.createElement("button");
-      btn.textContent = p;
-      btn.className = p === currentPage ? "active" : "";
-      btn.onclick = (function(page) { return function() { currentPage = page; filterRows(); }; })(p);
-      pagination.appendChild(btn);
-    }
-    var nextBtn = document.createElement("button");
-    nextBtn.textContent = "下一页";
-    nextBtn.disabled = currentPage === totalPages;
-    nextBtn.onclick = function() { currentPage++; filterRows(); };
-    pagination.appendChild(nextBtn);
-  }
-  searchInput.addEventListener("input", function() { currentPage = 1; filterRows(); });
-  statusFilter.addEventListener("change", function() { currentPage = 1; filterRows(); });
+
+  searchInput.addEventListener("input", applyFilter);
+  statusFilter.addEventListener("change", applyFilter);
 
   // 表格勾选与批量删除
   var selectAll = document.getElementById("selectAll");
   var selCount = document.getElementById("selCount");
   var batchDelete = document.getElementById("batchDelete");
+  var expandAllBtn = document.getElementById("expandAll");
+  var collapseAllBtn = document.getElementById("collapseAll");
 
   function rowChecks() {
     return Array.prototype.slice.call(document.querySelectorAll(".row-check"));
@@ -1153,6 +1565,19 @@ summary::marker{color:var(--accent)}
       var c = tr.querySelector(".row-check");
       return c && c.checked;
     });
+    selectAll.indeterminate = !selectAll.checked && filteredRows.some(function (tr) {
+      var c = tr.querySelector(".row-check");
+      return c && c.checked;
+    });
+    groups.forEach(function (g) {
+      var checkedCount = g.visible.filter(function (tr) {
+        var c = tr.querySelector(".row-check");
+        return c && c.checked;
+      }).length;
+      g.check.disabled = g.visible.length === 0;
+      g.check.checked = g.visible.length > 0 && checkedCount === g.visible.length;
+      g.check.indeterminate = checkedCount > 0 && checkedCount < g.visible.length;
+    });
   }
   selectAll.onchange = function () {
     filteredRows.forEach(function (tr) {
@@ -1164,10 +1589,32 @@ summary::marker{color:var(--accent)}
   document.querySelectorAll(".row-check").forEach(function (c) {
     c.onchange = updateSelection;
   });
+  expandAllBtn.onclick = function () {
+    groups.forEach(function (g) {
+      g.open = true;
+      g.head.classList.add("open");
+      g.caret.textContent = "▼";
+    });
+    applyFilter();
+  };
+  collapseAllBtn.onclick = function () {
+    groups.forEach(function (g) {
+      g.open = false;
+      g.head.classList.remove("open");
+      g.caret.textContent = "▶";
+    });
+    applyFilter();
+  };
   batchDelete.onclick = function () {
     var names = selectedNames();
     if (names.length === 0) return;
     if (!confirm("确定从配置中删除选中的 " + names.length + " 个域名？删除后需点「保存并生效」。")) return;
+    try {
+      syncFormIfNeeded();
+    } catch (e) {
+      msg.textContent = e.message;
+      return;
+    }
     var cfgObj;
     try {
       cfgObj = JSON.parse(cfg.value);
@@ -1182,6 +1629,7 @@ summary::marker{color:var(--accent)}
     });
     var removed = before - cfgObj.domains.length;
     cfg.value = JSON.stringify(cfgObj, null, 2);
+    if (cfgTab === "form") fillForm(cfg.value);
     cfgMsg.textContent = "已从配置移除 " + removed + " 个域名，请点「保存并生效」写入";
     msg.textContent = "已移除 " + removed + " 个域名";
     var details = document.querySelector("details");
@@ -1192,7 +1640,8 @@ summary::marker{color:var(--accent)}
     updateSelection();
   };
 
-  filterRows();
+  buildGroups();
+  applyFilter();
 
   // 展开域名模态框
   var modal = document.getElementById("expandModal");

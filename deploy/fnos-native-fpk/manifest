@@ -1,5 +1,5 @@
 appname=hosts-optimizer-native
-version=1.0.2
+version=1.0.3
 display_name=Hosts 优选订阅（原生）
 desc=飞牛原生服务：定时为自定义域名优选可用 IP，生成 hosts / AdGuard Home 订阅文件。单静态二进制，无 Docker、无运行时依赖。
 source=thirdparty
@@ -12,6 +12,6 @@ os_min_version=1.2.0
 service_port=18088
 checkport=true
 ctl_stop=true
-changelog=新增域名发现：输入主域名后自动发现相关子域名，支持勾选批量添加与批量删除；界面全面改版；即时刷新改为后台任务 + 进度轮询，不再阻塞页面。
+changelog=域名列表按主域名分组，点分组标题展开该分类并支持整组勾选；配置改为图形化表单，参数与域名填写后保存生效，保留 JSON 源码模式。
 desktop_uidir=ui
 desktop_applaunchname=hosts-optimizer-native.main

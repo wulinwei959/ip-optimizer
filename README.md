@@ -49,6 +49,8 @@ AdGuard Home 订阅
 - **配置热加载**：每轮重新读取 `domains.json`，增删域名下一轮自动生效；也可 `POST /refresh` 立即重跑，无需重启。
 - **重启可恢复**：启动时从磁盘恢复上一轮产物，不必等首轮探测结束就能对外提供订阅。
 - **域名发现**：在「编辑域名清单」输入主域名（如 `github.com`），自动从 CT 日志、字典与规则中发现相关子域名；下拉列表逐项勾选，点「添加」即可写入配置，无需手工抄写。
+- **按主域名分组**：状态表按可注册主域名归类（如 `api.gitlab.com` 归入 `gitlab.com`），点分组标题展开该分类的全部域名；支持整组勾选、全部展开/收起，搜索时自动展开命中分组。
+- **图形化配置**：轮询周期、探测 DNS、并发、超时、滞回、子域名展开等参数与域名列表均可在表单内直接填写，保存后自动写回 `domains.json` 并触发新一轮；需要精细控制时可切到 JSON 源码模式。
 - **异步刷新**：`POST /refresh` 立即返回 `task_id` 并在后台执行，页面轮询 `/api/refresh-status` 显示进度，长时间探测不再阻塞请求。
 - **fnOS 桌面入口**：桌面图标以 iframe 窗口打开状态页，可查看生效 IP / 延迟、一键复制订阅地址、点「立即刷新」触发新一轮；表格支持勾选与批量删除。
 
@@ -70,7 +72,7 @@ AdGuard Home 订阅
    ```
 
    `agh.txt` 使用 `||domain^$dnsrewrite=NOERROR;A;IP`，覆盖子域且让 AAAA 天然返回 NODATA（详见下方「已查证的坑」）。
-6. **添加域名**：打开状态页，在「编辑域名清单」输入主域名并点「获取域名列表」，勾选需要的结果后点「添加」，再点「保存并生效」；也可直接编辑 JSON 或 `/var/apps/hosts-optimizer-native/etc/domains.json`。
+6. **配置域名**：打开状态页，在「编辑域名清单」的图形化表单里调整参数或增删域名；也可输入主域名点「获取域名列表」，勾选后批量添加，最后点「保存并生效」。需要直接改 JSON 时切换到「JSON 源码」，或编辑 `/var/apps/hosts-optimizer-native/etc/domains.json`。
 
 > 若用 HTTPS 访问飞牛桌面，iframe 加载 `http://...:18088` 可能被浏览器按混合内容拦截，表现为窗口空白。此时改用浏览器直接访问 `http://<NAS_IP>:18088/`，或把 `app/ui/config` 的 `type` 改为 `url`。
 
@@ -253,6 +255,7 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 - **真机 1.0.0**：二进制以包用户（uid 900）运行可监听、抓取、写产物，SIGTERM 干净退出；`github.com` / `raw.githubusercontent.com` 的 TLS 校验通过并产出真实 IP；无限重启问题已修复。
 - **真机 1.0.1**：`app stop` / `app start` / `app restart` 均返回成功，应用中心状态与真实进程一致；卸载重装后 `domains.json`、`output/`、`state/` 保留；`/`、`/status.json`、`/hosts.txt`、`/agh.txt` 均返回 200，`ETag` → 304；`10350` 已修复。
 - **真机 1.0.2**：卸载重装后配置与产物保留，页面显示 18 个域名、17 个生效；`/`、`/status.json`、`/hosts.txt`、`/agh.txt` 均 200，`ETag` → 304；`POST /refresh` 返回 `202` + `task_id`，约 93 秒后轮询到 `state=done`（旧同步接口会超时），期间页面不阻塞；`/api/expand` 对 `github.com` 返回 50 个相关域名（12 个可解析），下拉勾选与「添加」写入配置正常；`app stop` / `app start` 均成功。
+- **真机 1.0.3**：卸载重装后配置与产物保留；状态表按主域名分组（如 `cloudflare.com` 7 个、`github.com`、`githubusercontent.com` 等），分组展开/收起与整组勾选正常；图形化表单正确带出轮询周期 60、端口 443、并发 20、候选 64、TCP 3 轮、超时 3 秒等参数，域名列表可编辑。
 
 **待验证 / 已知限制**
 
