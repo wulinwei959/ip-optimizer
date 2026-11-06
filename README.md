@@ -14,13 +14,15 @@
 
 仓库：<https://github.com/wulinwei959/ip-optimizer>
 
+当前版本：**1.0.9**（版本历史与验证记录见 [`docs/progress.md`](docs/progress.md)）
+
 ---
 
 ## 工作原理
 
 ```
 domains.json
-   ↓ 多源 DNS 采集（手写 UDP 53 报文，无第三方库）
+   ↓ DNS 采集：UDP / DoT / DoH（手写报文，无第三方库）
    ↓ 过滤回环 / 私有 / CGNAT / 保留段
 候选 IP 池
    ↓ TCP 握手测速 ×3 取中位数
@@ -34,7 +36,7 @@ AdGuard Home 订阅
 
 两条防循环依赖的硬约束：
 
-- `probe_dns` 必须是**字面 IP**（配置校验会拒绝主机名），且必须绕开本机 AdGuard Home —— 否则「用待优化的解析结果去找候选 IP」形成循环依赖。
+- `probe_dns` 支持明文 UDP（必须是字面 IP）、DoT（`tls://主机[:853]`）与 DoH（`https://主机/路径`），可混用；所有上游都必须绕开本机 AdGuard Home —— 否则「用待优化的解析结果去找候选 IP」形成循环依赖。DoQ 需要第三方 QUIC 库，本项目坚持零依赖，因此不支持。
 - 订阅地址用 NAS **内网 IP**，不要填公网域名。
 
 核心用 **Go 标准库、零第三方依赖**（`go.mod` 仅 `module hosts-optimizer` + `go 1.21`），`CGO_ENABLED=0` 交叉编译成单个静态 ELF。构建脚本强制 `GOPROXY=off`：一旦误引入第三方依赖会直接构建失败，而不是偷偷联网。
@@ -49,8 +51,17 @@ AdGuard Home 订阅
 - **配置热加载**：每轮重新读取 `domains.json`，增删域名下一轮自动生效；也可 `POST /refresh` 立即重跑，无需重启。
 - **重启可恢复**：启动时从磁盘恢复上一轮产物，不必等首轮探测结束就能对外提供订阅。
 - **域名发现**：在「编辑域名清单」输入主域名（如 `github.com`），自动从 CT 日志、字典与规则中发现相关子域名；下拉列表逐项勾选，点「添加」即可写入配置，无需手工抄写。
+- **按主域名分组**：状态表按可注册主域名归类（如 `api.gitlab.com` 归入 `gitlab.com`），点分组标题展开该分类的全部域名；支持整组勾选、全部展开/收起，搜索时自动展开命中分组。
+- **图形化配置**：轮询周期、探测 DNS、并发、超时、滞回、子域名展开等参数与域名列表均可在表单内直接填写，保存后自动写回 `domains.json` 并触发新一轮；需要精细控制时可切到 JSON 源码模式。
+- **加密 DNS 上游**：`probe_dns` 支持 UDP、DoT、DoH 混用，例如 `tls://dns.alidns.com`、`https://dns.cloudflare.com/dns-query`；DoQ 需第三方 QUIC 库，未引入。
+- **主题跟随系统**：默认跟随系统的深/浅色设置，也可在页面手动切换「浅色 / 深色 / 跟随系统」，选择保存在浏览器本地。
+- **应用内运行日志**：页面底部提供日志面板，内存保留最近 2000 行，支持增量刷新、暂停自动刷新、关键字筛选与清空视图，便于实时排查。
+- **历史趋势**：每轮探测结果按月写入 `history/rounds-YYYYMM.jsonl.gz`（gzip 压缩），默认保留 12 个月；页面可按域名与时间范围查看平均延迟趋势和最近记录。
+- **批量刷新选中**：展开主域名分组后可勾选单个域名或整组，点「刷新选中」只重跑这些域名，其余结果保持不变。
+- **候选延时与手动切换**：点击表格中的延迟数值可查看本轮全部可连接 IP 的延迟，并手动切换当前生效 IP；切换会立即写入状态与订阅产物。
+- **AGH 规则刷新**：「刷新 AGH 规则」按钮只根据当前快照重新生成 `agh.txt`，不重新探测 DNS/TCP；手动刷新选中域名或切换 IP 后也会自动同步订阅文件。
 - **异步刷新**：`POST /refresh` 立即返回 `task_id` 并在后台执行，页面轮询 `/api/refresh-status` 显示进度，长时间探测不再阻塞请求。
-- **fnOS 桌面入口**：桌面图标以 iframe 窗口打开状态页，可查看生效 IP / 延迟、一键复制订阅地址、点「立即刷新」触发新一轮；表格支持勾选与批量删除。
+- **fnOS 桌面入口**：桌面图标以 iframe 窗口打开状态页，可查看生效 IP / 延迟、复制订阅地址、刷新选中域名或单独重写 AGH 规则；表格支持勾选与批量操作。
 
 ---
 
@@ -70,7 +81,7 @@ AdGuard Home 订阅
    ```
 
    `agh.txt` 使用 `||domain^$dnsrewrite=NOERROR;A;IP`，覆盖子域且让 AAAA 天然返回 NODATA（详见下方「已查证的坑」）。
-6. **添加域名**：打开状态页，在「编辑域名清单」输入主域名并点「获取域名列表」，勾选需要的结果后点「添加」，再点「保存并生效」；也可直接编辑 JSON 或 `/var/apps/hosts-optimizer-native/etc/domains.json`。
+6. **配置域名**：打开状态页，在「编辑域名清单」的图形化表单里调整参数或增删域名；也可输入主域名点「获取域名列表」，勾选后批量添加，最后点「保存并生效」。需要直接改 JSON 时切换到「JSON 源码」，或编辑 `/var/apps/hosts-optimizer-native/etc/domains.json`。
 
 > 若用 HTTPS 访问飞牛桌面，iframe 加载 `http://...:18088` 可能被浏览器按混合内容拦截，表现为窗口空白。此时改用浏览器直接访问 `http://<NAS_IP>:18088/`，或把 `app/ui/config` 的 `type` 改为 `url`。
 
@@ -148,7 +159,7 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 | `HO_TZ` | `Asia/Shanghai` | 时区，静态二进制自带 tzdata，不依赖宿主 `/usr/share/zoneinfo` |
 | `HO_CA_BUNDLE` | 空 | 可选 CA 证书文件；**文件不存在时降级为仅用系统证书池，不是致命错误** |
 | `HO_SCHEDULE_MINUTES` | — | 覆盖 `defaults.schedule_minutes` |
-| `HO_PROBE_DNS` | — | 覆盖上游 DNS，逗号分隔的字面 IP |
+| `HO_PROBE_DNS` | — | 覆盖上游 DNS，逗号分隔；UDP 用字面 IP，也可写 `tls://` / `https://` |
 | `HO_PROBE_CONCURRENCY` | — | 覆盖 `defaults.concurrency` |
 
 ### `domains.json`
@@ -178,12 +189,17 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 
 | 路径 | 说明 |
 | --- | --- |
-| `/` | 概览页：状态表格、复制订阅地址、立即刷新 |
+| `/` | 概览页：状态表格、复制订阅地址、批量刷新、候选 IP 切换、历史与日志 |
 | `/hosts.txt` | `IP domain` 逐行，`/etc/hosts` 语法 |
 | `/agh.txt` | `\|\|domain^$dnsrewrite=NOERROR;A;IP`，推荐 |
 | `/status.json` | 每域名候选数、通过数、生效 IP、延迟、切换原因、本轮时间 |
-| `POST /refresh` | 提交后台刷新任务，立即返回 `202` 与 `{"ok":true,"task_id":"r..."}`；已有任务在跑时复用 |
+| `POST /refresh` | 提交后台刷新任务，立即返回 `202` 与 `{"ok":true,"task_id":"r..."}`；可选 JSON 体 `{"domains":["a.com"]}` 只刷新指定域名；已有任务在跑时复用 |
 | `GET /api/refresh-status?task_id=...` | 查询刷新进度：`state` 为 `running` / `done` / `error`，完成时带 `next_round_minutes` |
+| `GET /api/logs?after=<seq>&limit=<n>` | 增量读取运行日志，返回 `entries` 与 `last_seq`；缓冲上限 2000 行 |
+| `GET /api/history?domain=&group=&from=&to=&limit=` | 查询探测历史；`from`/`to` 支持 RFC3339 或 `YYYY-MM-DD`，默认最近 7 天，`limit` 上限 5000 |
+| `GET /api/candidates?domain=<域名>` | 返回该域名最近一轮全部可连接 IP 与延迟、当前生效 IP |
+| `POST /api/switch` | 手动切换：JSON 体 `{"domain":"a.com","ip":"1.2.3.4"}`，IP 必须在该域名最近候选列表中 |
+| `POST /api/refresh-agh` | 只用当前快照重写 `agh.txt`，返回字节数，不触发探测 |
 | `GET /api/domains` | 读取 `domains.json` 原文 |
 | `PUT /api/domains` | 校验并原子写回 `domains.json`（要求 `Content-Type: application/json`） |
 | `POST /api/expand` | 按需发现主域名的相关子域名，返回解析结果（不修改配置） |
@@ -210,7 +226,7 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 .
 ├── core/                          # Go 核心（仅标准库）
 │   ├── cmd/hosts-optimizer/       # 入口：-version / -check-config / 服务
-│   └── internal/{config,dnsquery,probe,store,output,app,util}
+│   └── internal/{config,dnsquery,probe,store,output,app,util,history,logbuf}
 ├── deploy/
 │   ├── fnos-native-fpk/           # 主轨：fnOS 纯原生 FPK 源工程
 │   │   ├── manifest
@@ -228,6 +244,12 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 ├── .gitignore / .gitattributes
 └── README.md
 ```
+
+运行时数据（fnOS 原生包）：
+
+- 配置：`/vol1/@appconf/hosts-optimizer-native/domains.json`
+- 产物：`/vol1/@appdata/hosts-optimizer-native/output/`
+- 状态与历史：`/vol1/@appdata/hosts-optimizer-native/state/`（`state.json` + `history/rounds-YYYYMM.jsonl.gz`）
 
 ---
 
@@ -253,14 +275,18 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 - **真机 1.0.0**：二进制以包用户（uid 900）运行可监听、抓取、写产物，SIGTERM 干净退出；`github.com` / `raw.githubusercontent.com` 的 TLS 校验通过并产出真实 IP；无限重启问题已修复。
 - **真机 1.0.1**：`app stop` / `app start` / `app restart` 均返回成功，应用中心状态与真实进程一致；卸载重装后 `domains.json`、`output/`、`state/` 保留；`/`、`/status.json`、`/hosts.txt`、`/agh.txt` 均返回 200，`ETag` → 304；`10350` 已修复。
 - **真机 1.0.2**：卸载重装后配置与产物保留，页面显示 18 个域名、17 个生效；`/`、`/status.json`、`/hosts.txt`、`/agh.txt` 均 200，`ETag` → 304；`POST /refresh` 返回 `202` + `task_id`，约 93 秒后轮询到 `state=done`（旧同步接口会超时），期间页面不阻塞；`/api/expand` 对 `github.com` 返回 50 个相关域名（12 个可解析），下拉勾选与「添加」写入配置正常；`app stop` / `app start` 均成功。
+- **真机 1.0.3**：卸载重装后配置与产物保留；状态表按主域名分组（如 `cloudflare.com` 7 个、`github.com`、`githubusercontent.com` 等），分组展开/收起与整组勾选正常；图形化表单正确带出轮询周期 60、端口 443、并发 20、候选 64、TCP 3 轮、超时 3 秒等参数，域名列表可编辑。
+- **真机 1.0.4**：把 `probe_dns` 临时改为 `https://dns.alidns.com/dns-query` + `tls://dns.alidns.com`，一轮约 75 秒完成，17/18 域名生效且候选数正常，验证后已恢复原配置；`quic://` 地址被配置校验拒绝并返回明确提示。
+- **真机 1.0.5**：页面默认跟随系统显示深色主题，手动切换浅色/深色后刷新仍保持；运行日志面板显示启动与探测日志（增量序号正常），关键字筛选可用；FPK manifest 的 `maintainer` / `distributor` 均为 `wulinwei959`，链接指向项目 GitHub。
+- **真机 1.0.6**：启动轮次自动写入 `history/rounds-202611.jsonl.gz`，两轮共 36 条记录；页面历史趋势可按域名与时间范围查询，平均延迟曲线与最近记录正常；重装后历史保留；FPK 内 64/256 图标尺寸正确。
+- **真机 1.0.9**：点击延迟可查看 4 个候选 IP 及延迟并手动切换生效；「刷新选中」只探测选中域名，完成后日志显示「AGH 订阅已同步」；「刷新 AGH 规则」只重写订阅文件且不触发探测。
 
 **待验证 / 已知限制**
 
-- 桌面图标入口（本轮新补）的真机显示效果尚未确认；覆盖安装后可能需要重启 `trim_app_center.service`。
-- 尚未在真实 AdGuard Home 实例中验证订阅解析与规则生效；当前只验证了订阅端点内容与 HTTP 语义。
+- 桌面入口在 fnOS 桌面内的实际显示仍需人工确认；覆盖安装后可能需要重启 `trim_app_center.service`。
+- AdGuard Home 订阅已接入测试环境，长期自动更新与不同客户端的解析表现仍需持续观察。
 - 真实公网域名下的一周 IP 抖动、滞回表现与多源 DNS 并集质量未长期观测。
 - 刷新任务保存在进程内存：服务重启后状态丢失（不影响已落盘产物），重新触发即可。
-- 图标是占位图（尺寸合规但很素），发布前建议替换。
 - A / B 轨道未验证；`config/resource` 的 `data-share` 共享目录编辑方案未启用。
 - `x509.SystemCertPool()` 在个别精简 fnOS 版本可能读不到系统 CA，此时需随包 `ca-bundle.crt`。
 
@@ -284,6 +310,8 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 | --- | --- |
 | [`deploy/README.md`](deploy/README.md) | 部署适配层：三形态取舍、接口契约、构建细节 |
 | [`deploy/config-schema/README.md`](deploy/config-schema/README.md) | `domains.json` 全字段表、HTTP 端点、IPv6 结论 |
+| [`docs/technical.md`](docs/technical.md) | 技术文档：架构、数据模型、API、并发、构建与扩展 |
+| [`docs/progress.md`](docs/progress.md) | 项目进度：版本历史、功能矩阵、验证记录、路线图 |
 | [`research/2026-11-05-nas-hosts-ip-optimizer.md`](research/2026-11-05-nas-hosts-ip-optimizer.md) | 需求与开源复用调研（2026-11-05 快照） |
 | [`research/2026-11-05-fnos-dual-deployment.md`](research/2026-11-05-fnos-dual-deployment.md) | fnOS FPK 契约核查、验收清单、方案决策 |
 

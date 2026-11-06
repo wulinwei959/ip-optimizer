@@ -2,6 +2,8 @@
 
 本目录只解决**部署与分发**，不含业务核心实现。
 
+当前版本 **1.0.9**；技术实现见 [`docs/technical.md`](../docs/technical.md)，版本历史与验证记录见 [`docs/progress.md`](../docs/progress.md)。
+
 ## 当前取舍：主轨 = fnOS 纯原生 FPK
 
 | 目录 | 形态 | 状态 |
@@ -16,7 +18,7 @@
 
 ## 核心工程的技术约束（决定能否真的离线）
 
-- **Go + 仅标准库**：`net/http`（单端口服务）、`crypto/tls`（SNI 证书校验）、`encoding/json`（配置）、`net`（自定义 DNS 查询，可手写 UDP 53 报文或用纯 Go `net.Resolver`）、`time.Ticker`（进程内定时）、`os.Rename`（原子写）。全部标准库，无 `go mod download`。
+- **Go + 仅标准库**：`net/http`（单端口服务）、`crypto/tls`（SNI 证书校验 / DoT）、`encoding/json`（配置）、`net`（自定义 DNS 查询：UDP / DoT / DoH，手写报文）、`time.Ticker`（进程内定时）、`os.Rename`（原子写）。全部标准库，无 `go mod download`。
 - **唯一一次性联网**：在本机装 Go SDK（单个安装包）。之后所有构建离线；`build-native-fpk.sh` 设 `GOPROXY=off GOSUMDB=off`，一旦误引入第三方依赖会**直接构建失败**而不是偷偷联网。
 - **交叉编译**：Windows 上 `GOOS=linux GOARCH=amd64|arm64 CGO_ENABLED=0 go build` 直接产出 Linux 静态 ELF，不需要 Linux 机器、Docker daemon、基础镜像。
 - **CA 根证书**：静态二进制不自带系统信任库。核心优先 `x509.SystemCertPool()`（fnOS 为 Debian 系，一般可用）；`HO_CA_BUNDLE` 指向的随包 `ca-bundle.crt` 为可选增强（放到 `deploy/ca-bundle.crt` 即会被构建脚本带入包）。**文件不存在时仅告警并降级为系统证书池，不致命退出** —— 早期把它当致命错误处理，曾导致 `Restart=always` 无限重启。
@@ -36,7 +38,7 @@ Linux / macOS / Git Bash：
 SKIP_PACK=1 ./deploy/scripts/build-native-fpk.sh x86   # 只编译，不调 fnpack
 ./deploy/scripts/build-native-fpk.sh x86
 ./deploy/scripts/build-native-fpk.sh arm
-# → deploy/dist/hosts-optimizer-native-1.0.1-x86.fpk / -arm.fpk
+# → deploy/dist/hosts-optimizer-native-1.0.9-x86.fpk / -arm.fpk
 ```
 
 Windows PowerShell（开发机没有 bash / pwsh 时用这份等价脚本；脚本为纯 ASCII，规避中文 GBK/UTF-8 编码问题）：
@@ -57,7 +59,7 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 
 订阅地址：推荐 `http://<NAS内网IP>:18088/agh.txt`（覆盖子域且 AAAA 天然 NODATA），或 `http://<NAS内网IP>:18088/hosts.txt`。在 AdGuard Home「过滤器 → DNS 封锁清单」添加，更新间隔改为 1 小时。安装后也可从桌面图标打开的状态页一键复制订阅地址。
 
-打包校验要求：`manifest`、`config/privilege`(JSON)、`config/resource`(JSON)、`ICON.PNG`(64×64)、`ICON_256.PNG`(256×256)、`app/`、`cmd/`、`wizard/` 齐全。骨架已生成占位图标，**发布前替换**。
+打包校验要求：`manifest`、`config/privilege`(JSON)、`config/resource`(JSON)、`ICON.PNG`(64×64)、`ICON_256.PNG`(256×256)、`app/`、`cmd/`、`wizard/` 齐全。图标已替换为正式版本，修改时从 `deploy/icon-source.png` 重新导出 64/256 两档。
 
 ## 核心必须遵守的接口契约
 
@@ -117,6 +119,20 @@ curl -X POST http://127.0.0.1:18088/refresh
 **1.0.1 真机验收**：修复 stop 脚本用 `pkill -f` 误杀自身导致的 `10350`；`app stop` / `app start` / `app restart` 均返回成功且应用中心状态与进程一致；卸载重装后 `domains.json`、`output/`、`state/` 保留；订阅端点 200、`ETag` 304 通过。
 
 **1.0.2 变更**：新增域名发现工具条（输入主域名 → 获取相关子域名 → 勾选 → 添加），表格支持全选与批量删除，页面视觉整体改版；`POST /refresh` 改为后台任务，返回 `202` + `task_id`，页面轮询 `/api/refresh-status` 展示进度。
+
+**1.0.3 变更**：状态表按主域名分组，点分组标题展开该分类并支持整组勾选；配置改为图形化表单（默认参数 + 域名列表 + 单域名高级项），保存后写回 JSON 并触发刷新，保留 JSON 源码模式。
+
+**1.0.4 变更**：`probe_dns` 支持 DoT（`tls://`）与 DoH（`https://`）加密上游，可与 UDP 混用；配置页直接填写并校验。DoQ 需要第三方 QUIC 库，按零依赖约束不支持。
+
+**1.0.5 变更**：新增主题跟随系统与手动切换（浅色/深色/跟随系统）；新增应用内实时运行日志面板（增量拉取、暂停自动刷新、关键字筛选）；发布者与开发者统一为 `wulinwei959`，主页指向 GitHub 仓库。
+
+**1.0.6 变更**：新增探测历史存储（`history/rounds-YYYYMM.jsonl.gz`，按月 gzip 分片，保留期可配置）与历史趋势图；应用图标替换为蓝底地球 + 绿色闪电，1024 源图见 `deploy/icon-source.png`。
+
+**1.0.7 变更**：新增「刷新选中」按钮，支持展开分组后勾选单个域名或整组批量刷新；后端按域名子集探测并合并结果，未选中的域名与产物保持不变。
+
+**1.0.8 变更**：点击延迟单元格可查看本轮全部候选 IP 的延迟并手动切换；「即时刷新」改名「刷新 AGH 规则」，只重写 `agh.txt` 不再重新探测。
+
+**1.0.9 变更**：手动刷新选中域名或手动切换 IP 后自动同步 `agh.txt` 订阅，页面提示同步结果。
 
 **仍需**：
 

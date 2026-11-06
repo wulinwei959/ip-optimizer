@@ -80,3 +80,20 @@ func TestDecideNoHistoryNoCandidates(t *testing.T) {
 		t.Fatalf("既无历史也无候选时应返回空，得到 %+v", d)
 	}
 }
+
+func TestDecidePersistsCandidates(t *testing.T) {
+	s := &State{Domains: make(map[string]*DomainState)}
+	now := time.Now()
+	s.Decide("example.com", []Candidate{
+		{IP: "1.1.1.1", LatencyMS: 10},
+		{IP: "2.2.2.2", LatencyMS: 20},
+	}, 20, 2, now)
+	st := s.Domains["example.com"]
+	if len(st.Candidates) != 2 || st.Candidates[0].IP != "1.1.1.1" {
+		t.Fatalf("候选列表未保存: %+v", st.Candidates)
+	}
+	s.Decide("example.com", nil, 20, 2, now)
+	if len(st.Candidates) != 0 {
+		t.Fatalf("失败轮应清空候选列表: %+v", st.Candidates)
+	}
+}

@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -14,13 +15,15 @@ import (
 
 	"hosts-optimizer/internal/app"
 	"hosts-optimizer/internal/config"
+	"hosts-optimizer/internal/logbuf"
 )
 
-const version = "1.0.2"
+const version = "1.0.9"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	log.SetPrefix("[hosts-optimizer] ")
+	log.SetOutput(io.MultiWriter(os.Stdout, logbuf.Default))
 
 	if len(os.Args) > 1 {
 		switch os.Args[1] {

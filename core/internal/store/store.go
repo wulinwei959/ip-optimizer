@@ -12,20 +12,21 @@ import (
 
 // Candidate 是一个本轮通过校验的 IP 及其延迟。
 type Candidate struct {
-	IP        string
-	LatencyMS float64
+	IP        string  `json:"ip"`
+	LatencyMS float64 `json:"latency_ms"`
 }
 
 // DomainState 是单个域名的切换状态。
 type DomainState struct {
-	IP                  string    `json:"ip"`
-	LatencyMS           float64   `json:"latency_ms"`
-	ChallengerIP        string    `json:"challenger_ip,omitempty"`
-	ChallengerWins      int       `json:"challenger_wins,omitempty"`
-	LastCheck           time.Time `json:"last_check"`
-	LastSwitch          time.Time `json:"last_switch,omitempty"`
-	ConsecutiveFailures int       `json:"consecutive_failures,omitempty"`
-	ValidatedLastRound  int       `json:"validated_last_round,omitempty"`
+	IP                  string      `json:"ip"`
+	LatencyMS           float64     `json:"latency_ms"`
+	ChallengerIP        string      `json:"challenger_ip,omitempty"`
+	ChallengerWins      int         `json:"challenger_wins,omitempty"`
+	LastCheck           time.Time   `json:"last_check"`
+	LastSwitch          time.Time   `json:"last_switch,omitempty"`
+	ConsecutiveFailures int         `json:"consecutive_failures,omitempty"`
+	ValidatedLastRound  int         `json:"validated_last_round,omitempty"`
+	Candidates          []Candidate `json:"candidates,omitempty"`
 }
 
 // State 是写进 $HO_STATE/state.json 的整体状态。
@@ -82,6 +83,7 @@ func (s *State) Decide(name string, valid []Candidate, percent, rounds int, now 
 	}
 	st.LastCheck = now
 	st.ValidatedLastRound = len(valid)
+	st.Candidates = append([]Candidate(nil), valid...)
 
 	if len(valid) == 0 {
 		st.ConsecutiveFailures++

@@ -2,7 +2,7 @@
 # path="docker" 相对 app/ 目录，对应本文件。版本 tag 需与 manifest.version 对齐。
 services:
   hosts-optimizer:
-    image: ghcr.io/your-org/hosts-optimizer:1.0.0
+    image: ghcr.io/wulinwei959/hosts-optimizer:1.0.0
     container_name: hosts-optimizer-fpk
     restart: unless-stopped
     # 绕开 AdGuard Home，避免探测 DNS 与订阅端点形成循环依赖

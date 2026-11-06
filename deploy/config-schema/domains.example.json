@@ -32,6 +32,7 @@
     "expand_concurrency": 10,
     "expand_timeout_seconds": 10,
     "expand_max_subdomains": 50,
-    "expand_sources": ["wordlist", "rules"]
+    "expand_sources": ["wordlist", "rules"],
+    "history_retention_months": 12
   }
 }

@@ -31,7 +31,7 @@
 | 字段 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `schedule_minutes` | int | 60 | 轮询间隔，不依赖系统 crontab，1..1440 |
-| `probe_dns` | string[] | 223.5.5.5 / 119.29.29.29 | **必须为字面 IP**，强烈建议核心机开启 AdGuard Home |
+| `probe_dns` | string[] | 223.5.5.5 / 119.29.29.29 | 上游列表，可混用 UDP（**字面 IP**）、DoT（`tls://主机[:853]`）、DoH（`https://主机/路径`）；需绕开本机 AdGuard Home；不支持 DoQ |
 | `probe_port` | int | 443 | 默认验证端口 |
 | `concurrency` | int | 20 | 并发验证数 (1..256)，过高易被运营商网络拦截 |
 | `hysteresis_percent` | int | 20 | 新 IP 需比当前优至少该百分比 |
@@ -44,6 +44,7 @@
 | `expand_timeout_seconds` | int | 10 | 域名展开单次超时 (1..60) |
 | `expand_max_subdomains` | int | 50 | 域名展开最大子域名数 (1..1000) |
 | `expand_sources` | string[] | ["wordlist", "rules"] | 全局默认展开来源 |
+| `history_retention_months` | int | 12 | 探测历史保留月数 (1..120)，过期分片自动清理 |
 
 `HO_SCHEDULE_MINUTES`、`HO_PROBE_DNS`、`HO_PROBE_CONCURRENCY` 可覆盖 `defaults`；`HO_PORT` / `HO_TZ` / `HO_CA_BUNDLE` / `HO_CONFIG` / `HO_OUTPUT` / `HO_STATE` 见 `deploy/README.md`。
 
@@ -55,11 +56,15 @@
 | `/hosts.txt` | `IP domain` 逐行，供 AdGuard Home、DNS 重写清单、/etc/hosts 订阅 |
 | `/agh.txt` | `\|\|domain^$dnsrewrite=NOERROR;A;IP`，**推荐**：自动子域名且 AAAA 自动 NODATA |
 | `/status.json` | 每个域名的选中 IP、通过数、生成 IP、换代原因、本轮时间 |
-| `POST /refresh` | 提交后台刷新任务，立即返回 `202` + `task_id` |
+| `POST /refresh` | 提交后台刷新任务，立即返回 `202` + `task_id`；可选 JSON 体 `{"domains":["a.com"]}` 只刷新指定域名 |
 | `GET /api/refresh-status?task_id=...` | 查询刷新进度：`running` / `done` / `error` |
 | `GET /api/domains` | 读取 domains.json 原文 |
 | `PUT/POST /api/domains` | 写入 domains.json（校验后原子写入） |
 | `POST /api/expand` | 域名展开：`{ "domain": "github.com", "sources": ["wordlist", "rules"] }` |
+| `GET /api/history` | 查询探测历史，支持 `domain`、`group`、`from`、`to`、`limit` |
+| `POST /api/refresh-agh` | 只用当前快照重写 `agh.txt`，不触发探测 |
+| `GET /api/candidates?domain=` | 返回该域名最近一轮全部候选 IP 与延迟、当前生效 IP |
+| `POST /api/switch` | 手动切换当前 IP：`{"domain":"a.com","ip":"1.2.3.4"}` |
 
 文本端点返回 `ETag` / `Last-Modified`，支持 `If-None-Match` -> 304。  
 无有效 IP 时 `hosts.txt` / `agh.txt` 返回 503（防止 AGH 订阅空清单），`status.json` 视为 200 并说明原因；配置校验、原子写保证关键时刻保留上一轮产物，不写坏文件。
@@ -75,7 +80,7 @@
 
 1. **SSH 编辑**（目前最稳）：`/var/apps/hosts-optimizer-native/etc/domains.json`，保存后 `POST /refresh` 即时生效
 2. **共享目录**：在 `config/resource` 加 `data-share`，让用户在群晖文件管理器中编辑；需验证 `TRIM_DATA_SHARE_PATHS` 挂载目录，目前未启用
-3. **Web 编辑页面**：管理界面与订阅端点共用同一 HTTP 服务；「编辑域名清单」内置域名发现工具，输入主域名后可勾选相关子域名批量添加，表格也支持勾选后批量删除
+3. **Web 编辑页面**：管理界面与订阅端点共用同一 HTTP 服务；「编辑域名清单」默认是图形化表单，可直接修改轮询周期、DNS、并发、超时、滞回与子域名展开参数，也可增删域名或打开单域名高级项；需要时切到 JSON 源码。上方域名发现工具支持输入主域名后勾选批量添加，状态表按主域名分组并支持整组勾选/批量删除
 
 ## 本地启动
 ```bash

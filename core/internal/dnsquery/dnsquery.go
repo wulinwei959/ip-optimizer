@@ -6,16 +6,36 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 )
+
+// upstream 描述一个 DNS 上游，kind 为 udp / dot / doh。
+type upstream struct {
+	kind string
+	addr string // udp/dot 的 host:port
+	host string // TLS SNI 或 DoH 主机名
+	url  string // DoH 完整地址
+}
+
+// Options 控制采集行为。
+type Options struct {
+	Timeout      time.Duration
+	AllowPrivate bool
+	Limit        int
+	RootCAs      *x509.CertPool // DoT/DoH 校验用；nil 表示系统证书池
+}
 
 func buildQuery(id uint16, name string) ([]byte, error) {
 	var b bytes.Buffer
@@ -113,18 +133,109 @@ func parseAResponse(msg []byte, wantID uint16) ([]net.IP, error) {
 	return ips, nil
 }
 
-func queryOne(ctx context.Context, server, name string, timeout time.Duration) ([]net.IP, error) {
+// ValidateServer 校验单个上游地址写法，供配置校验使用。
+func ValidateServer(raw string) error {
+	_, err := parseServer(raw)
+	return err
+}
+
+func splitHostPortDefault(hostport, defPort string) (string, string, error) {
+	hostport = strings.TrimSpace(hostport)
+	if hostport == "" {
+		return "", "", errors.New("DNS 地址缺少主机名")
+	}
+	if h, p, err := net.SplitHostPort(hostport); err == nil {
+		if h == "" || p == "" {
+			return "", "", fmt.Errorf("DNS 地址缺少主机或端口: %q", hostport)
+		}
+		return h, p, nil
+	}
+	if strings.HasPrefix(hostport, "[") && strings.HasSuffix(hostport, "]") {
+		return strings.TrimSuffix(strings.TrimPrefix(hostport, "["), "]"), defPort, nil
+	}
+	return hostport, defPort, nil
+}
+
+// parseServer 解析上游地址：
+//
+//	223.5.5.5                      -> UDP 53
+//	223.5.5.5:5353 / udp://...     -> UDP 指定端口
+//	tls://dns.alidns.com[:853]     -> DoT
+//	https://dns.alidns.com/dns-query -> DoH
+func parseServer(raw string) (upstream, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return upstream{}, errors.New("DNS 地址不能为空")
+	}
+	if !strings.Contains(s, "://") {
+		if ip := net.ParseIP(s); ip != nil {
+			return upstream{kind: "udp", addr: net.JoinHostPort(s, "53"), host: s}, nil
+		}
+		if h, p, err := net.SplitHostPort(s); err == nil {
+			if net.ParseIP(h) == nil {
+				return upstream{}, fmt.Errorf("UDP DNS 必须是字面 IP: %q", s)
+			}
+			return upstream{kind: "udp", addr: net.JoinHostPort(h, p), host: h}, nil
+		}
+		return upstream{}, fmt.Errorf("无法识别的 DNS 地址 %q：UDP 用 IP，加密 DNS 用 tls:// 或 https://", s)
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return upstream{}, fmt.Errorf("解析 DNS 地址 %q 失败: %w", s, err)
+	}
+	if u.Host == "" {
+		return upstream{}, fmt.Errorf("DNS 地址 %q 缺少主机名", s)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "udp", "dns":
+		h, p, err := splitHostPortDefault(u.Host, "53")
+		if err != nil {
+			return upstream{}, err
+		}
+		if net.ParseIP(h) == nil {
+			return upstream{}, fmt.Errorf("UDP DNS 必须是字面 IP: %q", h)
+		}
+		return upstream{kind: "udp", addr: net.JoinHostPort(h, p), host: h}, nil
+	case "tls", "dot":
+		h, p, err := splitHostPortDefault(u.Host, "853")
+		if err != nil {
+			return upstream{}, err
+		}
+		return upstream{kind: "dot", addr: net.JoinHostPort(h, p), host: h}, nil
+	case "https":
+		if u.Path == "" {
+			u.Path = "/dns-query"
+		}
+		return upstream{kind: "doh", host: u.Hostname(), url: u.String()}, nil
+	case "http":
+		return upstream{}, errors.New("DoH 必须使用 https://")
+	case "quic", "doq":
+		return upstream{}, errors.New("暂不支持 DoQ：QUIC 需要第三方库，本项目仅使用 Go 标准库")
+	default:
+		return upstream{}, fmt.Errorf("不支持的 DNS 协议 %q（可用：udp、tls、dot、https）", u.Scheme)
+	}
+}
+
+func newQuery(name string) (uint16, []byte, error) {
 	var idBytes [2]byte
 	if _, err := rand.Read(idBytes[:]); err != nil {
-		return nil, err
+		return 0, nil, err
 	}
 	id := binary.BigEndian.Uint16(idBytes[:])
 	q, err := buildQuery(id, name)
 	if err != nil {
+		return 0, nil, err
+	}
+	return id, q, nil
+}
+
+func queryUDP(ctx context.Context, up upstream, name string, timeout time.Duration) ([]net.IP, error) {
+	id, q, err := newQuery(name)
+	if err != nil {
 		return nil, err
 	}
 	d := net.Dialer{Timeout: timeout}
-	conn, err := d.DialContext(ctx, "udp", net.JoinHostPort(server, "53"))
+	conn, err := d.DialContext(ctx, "udp", up.addr)
 	if err != nil {
 		return nil, err
 	}
@@ -139,6 +250,99 @@ func queryOne(ctx context.Context, server, name string, timeout time.Duration) (
 		return nil, err
 	}
 	return parseAResponse(buf[:n], id)
+}
+
+func queryDoT(ctx context.Context, up upstream, name string, timeout time.Duration, roots *x509.CertPool) ([]net.IP, error) {
+	id, q, err := newQuery(name)
+	if err != nil {
+		return nil, err
+	}
+	d := net.Dialer{Timeout: timeout}
+	raw, err := d.DialContext(ctx, "tcp", up.addr)
+	if err != nil {
+		return nil, err
+	}
+	defer raw.Close()
+	_ = raw.SetDeadline(time.Now().Add(timeout))
+	conn := tls.Client(raw, &tls.Config{
+		ServerName: up.host, RootCAs: roots, MinVersion: tls.VersionTLS12,
+	})
+	if err := conn.HandshakeContext(ctx); err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+
+	frame := make([]byte, 2+len(q))
+	binary.BigEndian.PutUint16(frame[:2], uint16(len(q)))
+	copy(frame[2:], q)
+	if _, err := conn.Write(frame); err != nil {
+		return nil, err
+	}
+	var lenBuf [2]byte
+	if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
+		return nil, err
+	}
+	n := int(binary.BigEndian.Uint16(lenBuf[:]))
+	if n < 12 {
+		return nil, errors.New("DoT 响应长度非法")
+	}
+	resp := make([]byte, n)
+	if _, err := io.ReadFull(conn, resp); err != nil {
+		return nil, err
+	}
+	return parseAResponse(resp, id)
+}
+
+func queryDoH(ctx context.Context, up upstream, name string, timeout time.Duration, roots *x509.CertPool) ([]net.IP, error) {
+	id, q, err := newQuery(name)
+	if err != nil {
+		return nil, err
+	}
+	transport := &http.Transport{
+		Proxy:                 nil,
+		TLSClientConfig:       &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
+		ForceAttemptHTTP2:     true,
+		DialContext:           (&net.Dialer{Timeout: timeout}).DialContext,
+		TLSHandshakeTimeout:   timeout,
+		ResponseHeaderTimeout: timeout,
+		IdleConnTimeout:       timeout,
+	}
+	client := &http.Client{Transport: transport, Timeout: timeout}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, up.url, bytes.NewReader(q))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/dns-message")
+	req.Header.Set("Accept", "application/dns-message")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("DoH 返回 HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if err != nil {
+		return nil, err
+	}
+	return parseAResponse(body, id)
+}
+
+func queryOne(ctx context.Context, raw, name string, timeout time.Duration, roots *x509.CertPool) ([]net.IP, error) {
+	up, err := parseServer(raw)
+	if err != nil {
+		return nil, err
+	}
+	switch up.kind {
+	case "dot":
+		return queryDoT(ctx, up, name, timeout, roots)
+	case "doh":
+		return queryDoH(ctx, up, name, timeout, roots)
+	default:
+		return queryUDP(ctx, up, name, timeout)
+	}
 }
 
 // usable 淘汰污染/保留地址：回环、私有段、链路本地、组播、文档用保留段、CGNAT。
@@ -172,9 +376,21 @@ func usable(ip net.IP, allowPrivate bool) bool {
 	return true
 }
 
-// Collect 并发查询所有上游，返回去重后的候选 IPv4 列表（按地址排序，保证顺序稳定）。
-// allowPrivate=false 时过滤 RFC1918；limit 限制单域名候选数，避免扫描量失控。
+// Collect 保持原有签名，等价于用默认 Options 调用 CollectWithOptions。
 func Collect(ctx context.Context, name string, servers []string, timeout time.Duration, allowPrivate bool, limit int) ([]string, error) {
+	return CollectWithOptions(ctx, name, servers, Options{
+		Timeout: timeout, AllowPrivate: allowPrivate, Limit: limit,
+	})
+}
+
+// CollectWithOptions 并发查询所有上游（UDP/DoT/DoH），返回去重后的候选 IPv4 列表
+// （按地址排序，保证顺序稳定）。allowPrivate=false 时过滤 RFC1918；
+// Limit 限制单域名候选数，避免扫描量失控。
+func CollectWithOptions(ctx context.Context, name string, servers []string, opts Options) ([]string, error) {
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
 	type answer struct {
 		ips []net.IP
 		err error
@@ -187,7 +403,7 @@ func Collect(ctx context.Context, name string, servers []string, timeout time.Du
 			defer wg.Done()
 			sub, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
-			ips, err := queryOne(sub, server, name, timeout)
+			ips, err := queryOne(sub, server, name, timeout, opts.RootCAs)
 			ch <- answer{ips: ips, err: err}
 		}(s)
 	}
@@ -205,7 +421,7 @@ func Collect(ctx context.Context, name string, servers []string, timeout time.Du
 		}
 		anySuccess = true
 		for _, ip := range a.ips {
-			if !usable(ip, allowPrivate) {
+			if !usable(ip, opts.AllowPrivate) {
 				continue
 			}
 			key := ip.String()
@@ -222,8 +438,8 @@ func Collect(ctx context.Context, name string, servers []string, timeout time.Du
 		return nil, lastErr
 	}
 	sort.Strings(out)
-	if limit > 0 && len(out) > limit {
-		out = out[:limit]
+	if opts.Limit > 0 && len(out) > opts.Limit {
+		out = out[:opts.Limit]
 	}
 	return out, nil
 }
