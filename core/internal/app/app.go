@@ -41,6 +41,7 @@ type App struct {
 	state                                     *store.State
 	stateMu                                   sync.RWMutex
 	history                                   history.Store
+	version                                   string
 
 	mu           sync.RWMutex
 	snap         *output.Snapshot
@@ -71,7 +72,7 @@ type refreshTask struct {
 }
 
 // New 初始化目录、CA 池、状态，并尝试从磁盘恢复上一轮产物。
-func New(rt *config.Runtime) (*App, error) {
+func New(rt *config.Runtime, version string) (*App, error) {
 	if err := os.MkdirAll(rt.OutputDir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建产物目录失败: %w", err)
 	}
@@ -103,6 +104,7 @@ func New(rt *config.Runtime) (*App, error) {
 		rootCAs:      pool,
 		state:        st,
 		history:      hs,
+		version:      version,
 		lastSchedule: rt.Config.Defaults.ScheduleMinutes,
 	}
 	a.recoverSnapshot()
@@ -1288,6 +1290,8 @@ input[type=text],input[type=number],select{padding:8px 11px;border:1px solid #d7
 details{margin:16px 0 0}
 summary{cursor:pointer;font-weight:600;padding:6px 0;color:#111827;font-size:15px}
 summary::marker{color:var(--accent)}
+.summary-meta{font-weight:400;font-size:13px;color:var(--muted);margin-left:6px;font-variant-numeric:tabular-nums}
+#domainListDetails>summary{margin-bottom:10px}
 .hint{color:var(--muted);font-size:13px;margin:8px 0}
 #cfg{width:100%;min-height:260px;font-family:var(--mono);font-size:12.5px;line-height:1.6;padding:12px;border:1px solid #d7dce5;border-radius:8px;resize:vertical;background:#fbfcfe}
 #cfgMsg{font-size:14px;color:var(--muted)}
@@ -1458,6 +1462,17 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 #logView .log-line{display:block}
 #logView .log-time{color:var(--muted);margin-right:8px}
 #logState{font-size:13px;color:var(--muted)}
+.mono{font-family:var(--mono)}
+.about-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px 24px;margin:6px 0 14px}
+.about-item{display:flex;gap:10px;align-items:baseline;font-size:13.5px;min-width:0}
+.about-label{color:var(--muted);flex:0 0 auto;font-size:12.5px}
+.about-value{color:var(--text);min-width:0;word-break:break-all;font-size:13px}
+a.about-value{color:var(--accent);text-decoration:none}
+a.about-value:hover{text-decoration:underline}
+.about-block h4{margin:0 0 6px;font-size:13px;color:var(--text);font-weight:600}
+.about-steps{margin:0;padding-left:20px;color:var(--muted);font-size:13px;line-height:1.85}
+.about-steps code{font-size:12px}
+.about-foot{margin-top:12px;color:var(--muted);font-size:12.5px;line-height:1.6}
 .history-tools{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:10px 0}
 #historyDomain{min-width:180px}
 #historyRange{min-width:130px}
@@ -1630,6 +1645,8 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 </div>
 
 <div class="card">
+<details id="domainListDetails">
+<summary>域名列表 <span class="summary-meta">有效 {{.ActiveCount}}/{{.DomainCount}}</span></summary>
 <div class="table-tools">
   <div class="left">
     <span id="selCount">已选 0 个域名</span>
@@ -1680,6 +1697,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 {{end}}
 </tbody></table>
 
+</details>
 </div>
 
 <div class="card">
@@ -1716,6 +1734,27 @@ tr.domain-row td:nth-child(2){padding-left:32px}
   <span id="logState"></span>
 </div>
 <pre id="logView"></pre>
+</details>
+</div>
+
+<div class="card">
+<details id="aboutDetails">
+<summary>关于</summary>
+<div class="about-grid">
+  <div class="about-item"><span class="about-label">版本</span><span class="about-value mono">v{{.Version}}</span></div>
+  <div class="about-item"><span class="about-label">项目地址</span><a class="about-value" href="{{.ProjectURL}}" target="_blank" rel="noopener">{{.ProjectURL}}</a></div>
+</div>
+<div class="about-block">
+  <h4>使用说明</h4>
+  <ol class="about-steps">
+    <li>在「编辑域名清单」中添加域名，或输入主域名后勾选相关子域名批量添加，最后点「保存并生效」。</li>
+    <li>在 AdGuard Home 打开「过滤器 → DNS 重写清单」，添加订阅地址 <code>http://&lt;NAS内网IP&gt;:18088/agh.txt</code>，更新间隔设为 1 小时。</li>
+    <li>需要立即更新时，展开域名分组后勾选并点「刷新选中」；只想重写订阅文件时点「刷新 AGH 规则」。</li>
+    <li>点击延迟数值可查看全部候选 IP 并手动切换；状态表支持按主域名分组以及启用/禁用域名。</li>
+    <li>其他端点：<code>/hosts.txt</code>（hosts 语法）、<code>/status.json</code>（运行状态与统计）。</li>
+  </ol>
+</div>
+<div class="about-foot">管理接口无登录鉴权，请仅在内网使用；刷新任务状态保存在进程内存，重启后重新触发即可。</div>
 </details>
 </div>
 
@@ -3128,6 +3167,8 @@ func (a *App) index(w http.ResponseWriter, r *http.Request) {
 		DomainCount     int
 		Ready           bool
 		Domains         []domainView
+		Version         string
+		ProjectURL      string
 	}{
 		GeneratedAt:     snap.Status.GeneratedAt.Format(time.RFC3339),
 		ScheduleMinutes: snap.Status.ScheduleMinutes,
@@ -3135,6 +3176,8 @@ func (a *App) index(w http.ResponseWriter, r *http.Request) {
 		DomainCount:     len(views),
 		Ready:           active > 0,
 		Domains:         views,
+		Version:         a.version,
+		ProjectURL:      "https://github.com/wulinwei959/ip-optimizer",
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := indexTmpl.Execute(w, data); err != nil {
