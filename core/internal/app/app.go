@@ -11,9 +11,11 @@ import (
 	"html/template"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +39,7 @@ type App struct {
 	hostsPath, aghPath, statusPath, statePath string
 	rootCAs                                   *x509.CertPool
 	state                                     *store.State
+	stateMu                                   sync.RWMutex
 	history                                   history.Store
 
 	mu           sync.RWMutex
@@ -63,6 +66,7 @@ type refreshTask struct {
 	StartedAt        time.Time  `json:"started_at"`
 	FinishedAt       *time.Time `json:"finished_at,omitempty"`
 	NextRoundMinutes int        `json:"next_round_minutes,omitempty"`
+	Domains          []string   `json:"domains,omitempty"`
 	Error            string     `json:"error,omitempty"`
 }
 
@@ -198,9 +202,15 @@ func (a *App) Run(ctx context.Context) error {
 	}
 }
 
-// doRound 执行一轮；roundMu 保证定时器与 /refresh 不会并发探测。
-// 每轮重新读取 domains.json，因此手动增删域名后下一轮自动生效，无需重启。
+// doRound 执行一轮全量探测。
 func (a *App) doRound(ctx context.Context) (int, error) {
+	return a.doRoundFor(ctx, nil)
+}
+
+// doRoundFor 执行一轮；only 非空时只刷新指定域名，并把结果合并回现有快照。
+// roundMu 保证定时器与 /refresh 不会并发探测。
+// 每轮重新读取 domains.json，因此手动增删域名后下一轮自动生效，无需重启。
+func (a *App) doRoundFor(ctx context.Context, only map[string]bool) (int, error) {
 	a.roundMu.Lock()
 	defer a.roundMu.Unlock()
 
@@ -225,18 +235,23 @@ func (a *App) doRound(ctx context.Context) (int, error) {
 		targets = append(targets, t)
 	}
 	// 展开放在配置域名之后，确保用户在 domains.json 里的显式配置优先。
-	base := append([]config.Target(nil), targets...)
-	for _, t := range base {
-		if !t.Expand {
-			continue
-		}
-		for _, sub := range a.expandSubdomains(ctx, t, d) {
-			if seen[sub.Name] {
+	// 定向刷新不重新展开，避免为了几个域名再跑一次子域名发现。
+	if only == nil {
+		base := append([]config.Target(nil), targets...)
+		for _, t := range base {
+			if !t.Expand {
 				continue
 			}
-			seen[sub.Name] = true
-			targets = append(targets, sub)
+			for _, sub := range a.expandSubdomains(ctx, t, d) {
+				if seen[sub.Name] {
+					continue
+				}
+				seen[sub.Name] = true
+				targets = append(targets, sub)
+			}
 		}
+	} else {
+		targets = selectTargets(targets, only, d)
 	}
 
 	entries := make([]output.Entry, 0, len(targets))
@@ -261,7 +276,9 @@ func (a *App) doRound(ctx context.Context) (int, error) {
 		for _, r := range results {
 			cands = append(cands, store.Candidate{IP: r.IP, LatencyMS: r.LatencyMS})
 		}
+		a.stateMu.Lock()
 		dec := a.state.Decide(t.Name, cands, d.HysteresisPercent, d.HysteresisRounds, time.Now())
+		a.stateMu.Unlock()
 		entries = append(entries, output.Entry{
 			Name: t.Name, IP: dec.IP, LatencyMS: dec.LatencyMS,
 			Reason: dec.Reason, Validated: dec.Validated,
@@ -270,50 +287,34 @@ func (a *App) doRound(ctx context.Context) (int, error) {
 		log.Printf("[%s] 候选 %d → 校验通过 %d → 生效 %q（%s）", t.Name, len(ips), len(results), dec.IP, dec.Reason)
 	}
 
-	now := time.Now()
-	if a.history != nil {
-		roundID := fmt.Sprintf("r%d", started.UnixNano())
-		records := make([]history.Record, 0, len(entries))
-		for _, e := range entries {
-			records = append(records, history.Record{
-				Time: now, RoundID: roundID, Domain: e.Name, Group: history.BaseDomain(e.Name),
-				IP: e.IP, LatencyMS: e.LatencyMS, Candidates: e.Candidates,
-				Validated: e.Validated > 0, Reason: e.Reason,
-			})
+	refreshed := entries
+	if only != nil {
+		a.mu.RLock()
+		var existing []output.StatusDomain
+		if a.snap != nil {
+			existing = a.snap.Status.Domains
 		}
-		if err := a.history.Append(records); err != nil {
-			log.Printf("写入历史失败: %v", err)
-		}
+		a.mu.RUnlock()
+		entries = mergeEntries(existing, refreshed)
 	}
+
+	now := time.Now()
+	a.appendHistory(refreshed, now, fmt.Sprintf("r%d", started.UnixNano()))
 	round := output.RoundInfo{
 		StartedAt: started, FinishedAt: now, OK: true,
 		ScheduleMinutes: d.ScheduleMinutes,
 	}
-	if err := a.state.Save(a.statePath, now); err != nil {
-		log.Printf("保存状态失败: %v", err)
+	a.stateMu.Lock()
+	saveErr := a.state.Save(a.statePath, now)
+	a.stateMu.Unlock()
+	if saveErr != nil {
+		log.Printf("保存状态失败: %v", saveErr)
 	}
 	snap, err := output.Build(entries, now, round)
 	if err != nil {
 		return d.ScheduleMinutes, err
 	}
-	if snap.Ready {
-		if err := util.AtomicWrite(a.hostsPath, snap.Hosts); err != nil {
-			return d.ScheduleMinutes, err
-		}
-		if err := util.AtomicWrite(a.aghPath, snap.AGH); err != nil {
-			return d.ScheduleMinutes, err
-		}
-	} else if !util.Exists(a.hostsPath) {
-		// 首次启动且还没有任何有效 IP：写仅含注释的文件，让端点可访问。
-		// 之后若整轮全灭，走 else 分支保留上一轮产物，绝不覆盖。
-		if err := util.AtomicWrite(a.hostsPath, snap.Hosts); err != nil {
-			return d.ScheduleMinutes, err
-		}
-		if err := util.AtomicWrite(a.aghPath, snap.AGH); err != nil {
-			return d.ScheduleMinutes, err
-		}
-	}
-	if err := util.AtomicWrite(a.statusPath, snap.StatusBytes); err != nil {
+	if err := a.writeSnapshot(snap); err != nil {
 		return d.ScheduleMinutes, err
 	}
 	a.mu.Lock()
@@ -321,6 +322,105 @@ func (a *App) doRound(ctx context.Context) (int, error) {
 	a.mu.Unlock()
 	log.Printf("本轮完成：%d/%d 个域名生效，产物已写入 %s", snap.Status.ActiveCount, len(entries), filepath.Dir(a.hostsPath))
 	return d.ScheduleMinutes, nil
+}
+
+// selectTargets 过滤出本次要刷新的目标；配置里不存在的子域名按默认参数补齐。
+func selectTargets(all []config.Target, only map[string]bool, d config.Defaults) []config.Target {
+	out := make([]config.Target, 0, len(only))
+	found := make(map[string]bool, len(only))
+	for _, t := range all {
+		if only[t.Name] {
+			out = append(out, t)
+			found[t.Name] = true
+		}
+	}
+	missing := make([]string, 0, len(only))
+	for name := range only {
+		if !found[name] {
+			missing = append(missing, name)
+		}
+	}
+	sort.Strings(missing)
+	for _, name := range missing {
+		out = append(out, config.Target{
+			Name: name, SNI: name, Port: d.ProbePort, ExpectStatus: d.ExpectStatus,
+		})
+	}
+	return out
+}
+
+// statusToEntries 把状态快照还原成可重新生成产物的条目。
+func statusToEntries(domains []output.StatusDomain) []output.Entry {
+	out := make([]output.Entry, 0, len(domains))
+	for _, s := range domains {
+		out = append(out, output.Entry{
+			Name: s.Name, IP: s.IP, LatencyMS: s.LatencyMS, Reason: s.Reason,
+			Validated: s.Validated, Candidates: s.Candidates, SuppressAAAA: s.SuppressAAAA,
+		})
+	}
+	return out
+}
+
+// mergeEntries 用本轮刷新的结果覆盖已有状态，其余域名保持不变。
+func mergeEntries(existing []output.StatusDomain, refreshed []output.Entry) []output.Entry {
+	base := statusToEntries(existing)
+	byName := make(map[string]output.Entry, len(base)+len(refreshed))
+	order := make([]string, 0, len(base)+len(refreshed))
+	for _, e := range base {
+		byName[e.Name] = e
+		order = append(order, e.Name)
+	}
+	for _, e := range refreshed {
+		if _, ok := byName[e.Name]; !ok {
+			order = append(order, e.Name)
+		}
+		byName[e.Name] = e
+	}
+	out := make([]output.Entry, 0, len(order))
+	for _, name := range order {
+		out = append(out, byName[name])
+	}
+	return out
+}
+
+// writeSnapshot 原子写入三份产物；整轮全灭且已有旧产物时保留旧文件。
+func (a *App) writeSnapshot(snap *output.Snapshot) error {
+	if snap.Ready {
+		if err := util.AtomicWrite(a.hostsPath, snap.Hosts); err != nil {
+			return err
+		}
+		if err := util.AtomicWrite(a.aghPath, snap.AGH); err != nil {
+			return err
+		}
+	} else if !util.Exists(a.hostsPath) {
+		// 首次启动且还没有任何有效 IP：写仅含注释的文件，让端点可访问。
+		// 之后若整轮全灭，保留上一轮产物，绝不覆盖。
+		if err := util.AtomicWrite(a.hostsPath, snap.Hosts); err != nil {
+			return err
+		}
+		if err := util.AtomicWrite(a.aghPath, snap.AGH); err != nil {
+			return err
+		}
+	}
+	return util.AtomicWrite(a.statusPath, snap.StatusBytes)
+}
+
+// appendHistory 写入一组探测记录；失败只告警，不影响本轮产物。
+func (a *App) appendHistory(entries []output.Entry, at time.Time, roundID string) {
+	if a.history == nil || len(entries) == 0 {
+		return
+	}
+	records := make([]history.Record, 0, len(entries))
+	for _, e := range entries {
+		records = append(records, history.Record{
+			Time: at, RoundID: roundID, Domain: e.Name, Group: history.BaseDomain(e.Name),
+			IP: e.IP, LatencyMS: e.LatencyMS, Candidates: e.Candidates,
+			Validated: e.Validated > 0, Reason: e.Reason,
+		})
+	}
+	if err := a.history.Append(records); err != nil {
+		log.Printf("写入历史失败: %v", err)
+	}
 }
 
 func (a *App) handle(w http.ResponseWriter, r *http.Request) {
@@ -343,6 +443,12 @@ func (a *App) handle(w http.ResponseWriter, r *http.Request) {
 		a.handleLogs(w, r)
 	case "/api/history":
 		a.handleHistory(w, r)
+	case "/api/candidates":
+		a.handleCandidates(w, r)
+	case "/api/switch":
+		a.handleSwitch(w, r)
+	case "/api/refresh-agh":
+		a.handleRefreshAGH(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -393,14 +499,38 @@ func (a *App) refresh(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "仅支持 POST"})
 		return
 	}
-	taskID, reused := a.startRefresh()
+	var req struct {
+		Domains []string `json:"domains"`
+	}
+	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "解析请求失败: " + err.Error()})
+			return
+		}
+	}
+	names := normalizeDomainNames(req.Domains)
+	taskID, reused := a.startRefresh(names)
 	writeJSON(w, http.StatusAccepted, map[string]any{
-		"ok": true, "task_id": taskID, "reused": reused,
+		"ok": true, "task_id": taskID, "reused": reused, "domains": names,
 	})
 }
 
+func normalizeDomainNames(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := make(map[string]bool, len(in))
+	for _, n := range in {
+		n = strings.ToLower(strings.TrimSpace(n))
+		if n == "" || seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	return out
+}
+
 // startRefresh 在后台启动一轮探测；已有任务在跑时直接复用，避免重复排队。
-func (a *App) startRefresh() (string, bool) {
+func (a *App) startRefresh(domains []string) (string, bool) {
 	a.refreshMu.Lock()
 	defer a.refreshMu.Unlock()
 	if a.refreshTask != nil && a.refreshTask.State == refreshRunning {
@@ -410,16 +540,34 @@ func (a *App) startRefresh() (string, bool) {
 		ID:        fmt.Sprintf("r%d", time.Now().UnixNano()),
 		State:     refreshRunning,
 		StartedAt: time.Now(),
+		Domains:   domains,
 	}
 	a.refreshTask = task
-	go a.runRefresh(task)
+	go a.runRefresh(task, domains)
 	return task.ID, false
 }
 
 // runRefresh 执行后台轮次并回填任务状态。
 // 使用独立 context：请求结束后探测不应被取消，各阶段仍有自身的超时控制。
-func (a *App) runRefresh(task *refreshTask) {
-	minutes, err := a.doRound(context.Background())
+func (a *App) runRefresh(task *refreshTask, domains []string) {
+	var minutes int
+	var err error
+	if len(domains) == 0 {
+		minutes, err = a.doRound(context.Background())
+	} else {
+		only := make(map[string]bool, len(domains))
+		for _, name := range domains {
+			only[name] = true
+		}
+		minutes, err = a.doRoundFor(context.Background(), only)
+	}
+	if err == nil {
+		if n, aghErr := a.rebuildAGH(time.Now()); aghErr != nil {
+			log.Printf("同步 AGH 订阅失败: %v", aghErr)
+		} else {
+			log.Printf("AGH 订阅已同步（%d 字节）", n)
+		}
+	}
 	finished := time.Now()
 	a.refreshMu.Lock()
 	defer a.refreshMu.Unlock()
@@ -460,7 +608,7 @@ func (a *App) handleRefreshStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "id": snap.ID, "state": snap.State,
 		"started_at": snap.StartedAt, "finished_at": snap.FinishedAt,
-		"next_round_minutes": snap.NextRoundMinutes, "error": snap.Error,
+		"next_round_minutes": snap.NextRoundMinutes, "domains": snap.Domains, "error": snap.Error,
 	})
 }
 
@@ -695,6 +843,212 @@ func parseHistoryTime(v string, isFrom bool) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("时间格式应为 RFC3339 或 YYYY-MM-DD: %q", v)
 }
 
+// handleCandidates 返回某域名最近一轮通过校验的全部候选 IP 与延迟。
+func (a *App) handleCandidates(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "仅支持 GET"})
+		return
+	}
+	domain := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("domain")))
+	if domain == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "domain 不能为空"})
+		return
+	}
+	a.stateMu.RLock()
+	st := a.state.Domains[domain]
+	current := ""
+	candidates := []store.Candidate{}
+	if st != nil {
+		current = st.IP
+		candidates = append(candidates, st.Candidates...)
+	}
+	a.stateMu.RUnlock()
+	if st == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "没有该域名的探测记录"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "domain": domain, "current_ip": current, "candidates": candidates,
+	})
+}
+
+// handleSwitch 手动把某个域名切换到候选列表中的指定 IP。
+func (a *App) handleSwitch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "仅支持 POST"})
+		return
+	}
+	if !strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+		writeJSON(w, http.StatusUnsupportedMediaType, map[string]any{"ok": false, "error": "需要 Content-Type: application/json"})
+		return
+	}
+	var req struct {
+		Domain string `json:"domain"`
+		IP     string `json:"ip"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "解析请求失败: " + err.Error()})
+		return
+	}
+	domain := strings.ToLower(strings.TrimSpace(req.Domain))
+	ip := strings.TrimSpace(req.IP)
+	if domain == "" || ip == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "domain/ip 不能为空"})
+		return
+	}
+	if net.ParseIP(ip) == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "ip 不是合法地址"})
+		return
+	}
+
+	a.roundMu.Lock()
+	defer a.roundMu.Unlock()
+	now := time.Now()
+
+	a.stateMu.Lock()
+	st := a.state.Domains[domain]
+	var chosen store.Candidate
+	found := false
+	if st != nil {
+		for _, c := range st.Candidates {
+			if c.IP == ip {
+				chosen, found = c, true
+				break
+			}
+		}
+	}
+	if st == nil || !found {
+		a.stateMu.Unlock()
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "该 IP 不在最近一轮的候选列表中，请先刷新该域名"})
+		return
+	}
+	st.IP = ip
+	st.LatencyMS = chosen.LatencyMS
+	st.LastSwitch = now
+	st.ChallengerIP = ""
+	st.ChallengerWins = 0
+	st.ConsecutiveFailures = 0
+	saveErr := a.state.Save(a.statePath, now)
+	candidateCount := len(st.Candidates)
+	a.stateMu.Unlock()
+	if saveErr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "保存状态失败: " + saveErr.Error()})
+		return
+	}
+
+	a.mu.RLock()
+	snap := a.snap
+	a.mu.RUnlock()
+	if snap == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "服务正在初始化，请稍后重试"})
+		return
+	}
+	entries := statusToEntries(snap.Status.Domains)
+	replaced := false
+	for i := range entries {
+		if entries[i].Name == domain {
+			entries[i].IP = ip
+			entries[i].LatencyMS = chosen.LatencyMS
+			entries[i].Validated = 1
+			entries[i].Reason = "手动切换"
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		entries = append(entries, output.Entry{
+			Name: domain, IP: ip, LatencyMS: chosen.LatencyMS,
+			Validated: 1, Reason: "手动切换", Candidates: candidateCount,
+		})
+	}
+	round := output.RoundInfo{
+		StartedAt: snap.Status.GeneratedAt, FinishedAt: now, OK: true,
+		ScheduleMinutes: snap.Status.ScheduleMinutes,
+	}
+	built, err := output.Build(entries, now, round)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "生成产物失败: " + err.Error()})
+		return
+	}
+	if err := a.writeSnapshot(built); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "写入产物失败: " + err.Error()})
+		return
+	}
+	a.mu.Lock()
+	a.snap = built
+	a.mu.Unlock()
+	a.appendHistory([]output.Entry{{
+		Name: domain, IP: ip, LatencyMS: chosen.LatencyMS,
+		Validated: 1, Reason: "手动切换", Candidates: candidateCount,
+	}}, now, fmt.Sprintf("r%d", now.UnixNano()))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "domain": domain, "ip": ip, "latency_ms": chosen.LatencyMS,
+	})
+}
+
+var (
+	errNoSnapshot = errors.New("服务正在初始化，请稍后重试")
+	errNoValidIP  = errors.New("暂无有效 IP，未刷新 AGH 规则")
+)
+
+// rebuildAGH 用当前快照重写 agh.txt，不重新探测。调用方无需持有 roundMu。
+func (a *App) rebuildAGH(now time.Time) (int, error) {
+	a.roundMu.Lock()
+	defer a.roundMu.Unlock()
+	a.mu.RLock()
+	snap := a.snap
+	a.mu.RUnlock()
+	if snap == nil {
+		return 0, errNoSnapshot
+	}
+	entries := statusToEntries(snap.Status.Domains)
+	round := output.RoundInfo{
+		StartedAt: snap.Status.GeneratedAt, FinishedAt: now, OK: true,
+		ScheduleMinutes: snap.Status.ScheduleMinutes,
+	}
+	built, err := output.Build(entries, now, round)
+	if err != nil {
+		return 0, fmt.Errorf("生成 AGH 规则失败: %w", err)
+	}
+	if !built.Ready {
+		return 0, errNoValidIP
+	}
+	if err := util.AtomicWrite(a.aghPath, built.AGH); err != nil {
+		return 0, fmt.Errorf("写入 AGH 规则失败: %w", err)
+	}
+	a.mu.Lock()
+	if a.snap != nil {
+		a.snap.AGH = built.AGH
+		a.snap.AGHETag = built.AGHETag
+		a.snap.Modified = now
+	}
+	a.mu.Unlock()
+	return len(built.AGH), nil
+}
+
+// handleRefreshAGH 只用当前快照重新生成 agh.txt，不重新探测。
+func (a *App) handleRefreshAGH(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "仅支持 POST"})
+		return
+	}
+	n, err := a.rebuildAGH(time.Now())
+	if err != nil {
+		code := http.StatusInternalServerError
+		if errors.Is(err, errNoSnapshot) {
+			code = http.StatusServiceUnavailable
+		} else if errors.Is(err, errNoValidIP) {
+			code = http.StatusConflict
+		}
+		writeJSON(w, code, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "bytes": n})
+}
+
 // parseExpandSources 校验并去重展开来源，空列表表示使用全局默认。
 func parseExpandSources(values []string) ([]expand.Source, error) {
 	out := make([]expand.Source, 0, len(values))
@@ -764,6 +1118,9 @@ summary::marker{color:var(--accent)}
 .badge-ct{background:#fff7ed;color:#c2410c}
 .badge-wl{background:#ecfdf5;color:#047857}
 .badge-rl{background:#f5f3ff;color:#6d28d9}
+.latency-btn{padding:0;border:none;background:transparent;color:var(--text);font-size:14px;font-family:inherit;text-decoration:underline dotted;text-underline-offset:3px;cursor:pointer}
+.latency-btn:hover{background:transparent;color:var(--accent)}
+.switch-btn{padding:4px 12px;font-size:12px}
 .discover{border:1px dashed #cfd6e2;background:#fafbfe;border-radius:10px;padding:12px;margin:10px 0 14px}
 .discover-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 #discoverInput{flex:1 1 280px;min-width:200px}
@@ -942,7 +1299,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 <div class="bar">
 <input id="sub" type="text" readonly>
 <button id="copy" type="button">复制订阅地址</button>
-<button id="refresh" type="button">即时刷新</button>
+<button id="refresh" type="button">刷新 AGH 规则</button>
 <select id="statusFilter">
   <option value="all">全部</option>
   <option value="ok">正常</option>
@@ -1071,8 +1428,9 @@ tr.domain-row td:nth-child(2){padding-left:32px}
     <button id="batchDelete" type="button" class="danger" disabled>删除选中</button>
     <button id="expandAll" type="button">全部展开</button>
     <button id="collapseAll" type="button">全部收起</button>
+    <button id="batchRefresh" type="button" disabled>刷新选中</button>
   </div>
-  <span class="hint" style="margin:0">按主域名分组；点分组标题展开该分类，勾选后可批量删除</span>
+  <span class="hint" style="margin:0">按主域名分组；点分组标题展开该分类，勾选后可批量刷新或删除</span>
 </div>
 <table><thead>
 <tr>
@@ -1090,7 +1448,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
   <td class="select-cell"><input type="checkbox" class="row-check" value="{{$d.Name}}"></td>
   <td class="truncate" title="{{$d.Name}}">{{$d.Name}}</td>
   <td class="truncate" title="{{$d.IP}}">{{$d.IP}}</td>
-  <td>{{$d.LatencyMS}} ms</td>
+  <td><button type="button" class="latency-btn" data-domain="{{$d.Name}}" title="查看全部候选 IP">{{$d.LatencyMS}} ms</button></td>
   <td>
     <span class="status-dot {{if $d.Validated}}status-ok{{else}}status-fail{{end}}"></span>
     {{if $d.Validated}}正常{{else}}失败{{end}}
@@ -1146,13 +1504,24 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 
 <div class="modal-overlay" id="expandModal">
   <div class="modal">
-    <h3>展开域名: <span id="modalDomain" style="font-family:monospace;color:#1976d2"></span></h3>
+    <h3>展开域名: <span id="modalDomain" style="font-family:monospace;color:var(--accent)"></span></h3>
     <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
-    <p id="progressText" style="font-size:13px;color:#666;margin:8px 0">准备中...</p>
+    <p id="progressText" style="font-size:13px;color:var(--muted);margin:8px 0">准备中...</p>
     <div class="result-list" id="resultList"></div>
     <div class="modal-actions">
       <button type="button" id="modalClose">关闭</button>
       <button type="button" id="modalAddAll" class="primary" disabled>全部添加到配置</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="ipModal">
+  <div class="modal">
+    <h3>候选 IP 延时: <span id="ipDomain" style="font-family:ui-monospace,Consolas,monospace;color:var(--accent)"></span></h3>
+    <p class="hint" id="ipHint"></p>
+    <div class="result-list" id="ipList"></div>
+    <div class="modal-actions">
+      <button type="button" id="ipClose">关闭</button>
     </div>
   </div>
 </div>
@@ -1190,9 +1559,14 @@ tr.domain-row td:nth-child(2){padding-left:32px}
   };
   var btn = document.getElementById("refresh");
   // 刷新改为后台任务：POST 拿到 task_id 后轮询状态，避免长请求卡住页面。
-  function startRefresh(statusEl, done) {
+  function startRefresh(statusEl, done, domains) {
     statusEl.textContent = "正在轮询，请稍等";
-    fetch("/refresh", { method: "POST" })
+    var opts = { method: "POST" };
+    if (domains && domains.length) {
+      opts.headers = { "Content-Type": "application/json" };
+      opts.body = JSON.stringify({ domains: domains });
+    }
+    fetch("/refresh", opts)
       .then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
       .then(function (x) {
         if (!x.body.ok || !x.body.task_id) {
@@ -1209,7 +1583,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
               }
               clearInterval(timer);
               if (s.state === "done") {
-                statusEl.textContent = "完成，即将刷新页面";
+                statusEl.textContent = "完成，AGH 订阅已同步，即将刷新页面";
                 if (done) done(true);
                 setTimeout(function () { location.reload(); }, 600);
                 return;
@@ -1231,7 +1605,21 @@ tr.domain-row td:nth-child(2){padding-left:32px}
   }
   btn.onclick = function () {
     btn.disabled = true;
-    startRefresh(msg, function () { btn.disabled = false; });
+    msg.textContent = "正在刷新 AGH 规则...";
+    fetch("/api/refresh-agh", { method: "POST" })
+      .then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
+      .then(function (x) {
+        btn.disabled = false;
+        if (x.body.ok) {
+          msg.textContent = "AGH 规则已刷新（" + x.body.bytes + " 字节）";
+        } else {
+          msg.textContent = "刷新失败: " + (x.body.error || ("HTTP " + x.status));
+        }
+      })
+      .catch(function (e) {
+        btn.disabled = false;
+        msg.textContent = "请求失败: " + e;
+      });
   };
 
   var cfg = document.getElementById("cfg");
@@ -1818,6 +2206,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
   var batchDelete = document.getElementById("batchDelete");
   var expandAllBtn = document.getElementById("expandAll");
   var collapseAllBtn = document.getElementById("collapseAll");
+  var batchRefresh = document.getElementById("batchRefresh");
 
   function rowChecks() {
     return Array.prototype.slice.call(document.querySelectorAll(".row-check"));
@@ -1830,6 +2219,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
     var total = selectedNames().length;
     selCount.textContent = "已选 " + total + " 个域名";
     batchDelete.disabled = total === 0;
+    batchRefresh.disabled = total === 0;
     selectAll.checked = filteredRows.length > 0 && filteredRows.every(function (tr) {
       var c = tr.querySelector(".row-check");
       return c && c.checked;
@@ -1873,6 +2263,17 @@ tr.domain-row td:nth-child(2){padding-left:32px}
       g.caret.textContent = "▶";
     });
     applyFilter();
+  };
+  batchRefresh.onclick = function () {
+    var names = selectedNames();
+    if (names.length === 0) return;
+    batchRefresh.disabled = true;
+    batchRefresh.textContent = "刷新中...";
+    msg.textContent = "正在刷新选中的 " + names.length + " 个域名...";
+    startRefresh(msg, function () {
+      batchRefresh.disabled = false;
+      batchRefresh.textContent = "刷新选中";
+    }, names);
   };
   batchDelete.onclick = function () {
     var names = selectedNames();
@@ -2019,17 +2420,103 @@ tr.domain-row td:nth-child(2){padding-left:32px}
     }
   };
 
+  // 候选 IP 延时与手动切换
+  var ipModal = document.getElementById("ipModal");
+  var ipDomain = document.getElementById("ipDomain");
+  var ipHint = document.getElementById("ipHint");
+  var ipList = document.getElementById("ipList");
+  document.getElementById("ipClose").onclick = function () { ipModal.classList.remove("show"); };
+  ipModal.onclick = function (e) { if (e.target === ipModal) ipModal.classList.remove("show"); };
+
+  function switchIP(domain, ip) {
+    ipHint.textContent = "正在切换到 " + ip + "...";
+    fetch("/api/switch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ domain: domain, ip: ip })
+    }).then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j.ok) {
+          ipHint.textContent = "切换失败: " + (j.error || "未知错误");
+          return;
+        }
+        ipHint.textContent = "已切换到 " + ip + "，AGH 订阅已同步，即将刷新页面";
+        setTimeout(function () { location.reload(); }, 700);
+      })
+      .catch(function (e) { ipHint.textContent = "请求失败: " + e; });
+  }
+
+  function openCandidates(domain) {
+    ipDomain.textContent = domain;
+    ipHint.textContent = "加载中...";
+    ipList.innerHTML = "";
+    ipModal.classList.add("show");
+    fetch("/api/candidates?domain=" + encodeURIComponent(domain))
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j.ok) {
+          ipHint.textContent = "加载失败: " + (j.error || "未知错误");
+          return;
+        }
+        var list = j.candidates || [];
+        ipHint.textContent = "共 " + list.length + " 个可连接 IP，当前生效 " + (j.current_ip || "无");
+        if (list.length === 0) {
+          var empty = document.createElement("div");
+          empty.className = "dropdown-empty";
+          empty.textContent = "本轮没有可连接的 IP";
+          ipList.appendChild(empty);
+          return;
+        }
+        list.forEach(function (c) {
+          var item = document.createElement("div");
+          item.className = "result-item result-ok";
+          var dot = document.createElement("span");
+          dot.className = "result-dot";
+          var info = document.createElement("div");
+          info.className = "result-info";
+          var ipEl = document.createElement("div");
+          ipEl.className = "result-domain";
+          ipEl.textContent = c.ip;
+          info.appendChild(ipEl);
+          item.appendChild(dot);
+          item.appendChild(info);
+          var meta = document.createElement("span");
+          meta.className = "result-ips";
+          meta.textContent = (Math.round(c.latency_ms * 10) / 10) + " ms";
+          item.appendChild(meta);
+          if (c.ip === j.current_ip) {
+            var badge = document.createElement("span");
+            badge.className = "badge";
+            badge.textContent = "当前";
+            item.appendChild(badge);
+          } else {
+            var sw = document.createElement("button");
+            sw.type = "button";
+            sw.className = "switch-btn";
+            sw.textContent = "切换";
+            sw.onclick = function () { switchIP(domain, c.ip); };
+            item.appendChild(sw);
+          }
+          ipList.appendChild(item);
+        });
+      })
+      .catch(function (e) { ipHint.textContent = "请求失败: " + e; });
+  }
+  document.querySelectorAll(".latency-btn").forEach(function (el) {
+    el.onclick = function () { openCandidates(el.dataset.domain); };
+  });
+
   // 单独刷新域名（实际触发一轮全量探测，按钮仅作快捷入口）
   document.querySelectorAll(".refresh-btn").forEach(function(rowBtn) {
     rowBtn.onclick = function() {
       var domain = rowBtn.dataset.domain;
       rowBtn.disabled = true;
       rowBtn.textContent = "刷新中...";
-      msg.textContent = "正在刷新 " + domain + " 等域名，请稍等";
+      msg.textContent = "正在刷新 " + domain + "...";
       startRefresh(msg, function() {
         rowBtn.disabled = false;
         rowBtn.textContent = "刷新";
-      });
+      }, [domain]);
     };
   });
 

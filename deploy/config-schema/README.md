@@ -56,12 +56,15 @@
 | `/hosts.txt` | `IP domain` 逐行，供 AdGuard Home、DNS 重写清单、/etc/hosts 订阅 |
 | `/agh.txt` | `\|\|domain^$dnsrewrite=NOERROR;A;IP`，**推荐**：自动子域名且 AAAA 自动 NODATA |
 | `/status.json` | 每个域名的选中 IP、通过数、生成 IP、换代原因、本轮时间 |
-| `POST /refresh` | 提交后台刷新任务，立即返回 `202` + `task_id` |
+| `POST /refresh` | 提交后台刷新任务，立即返回 `202` + `task_id`；可选 JSON 体 `{"domains":["a.com"]}` 只刷新指定域名 |
 | `GET /api/refresh-status?task_id=...` | 查询刷新进度：`running` / `done` / `error` |
 | `GET /api/domains` | 读取 domains.json 原文 |
 | `PUT/POST /api/domains` | 写入 domains.json（校验后原子写入） |
 | `POST /api/expand` | 域名展开：`{ "domain": "github.com", "sources": ["wordlist", "rules"] }` |
 | `GET /api/history` | 查询探测历史，支持 `domain`、`group`、`from`、`to`、`limit` |
+| `POST /api/refresh-agh` | 只用当前快照重写 `agh.txt`，不触发探测 |
+| `GET /api/candidates?domain=` | 返回该域名最近一轮全部候选 IP 与延迟、当前生效 IP |
+| `POST /api/switch` | 手动切换当前 IP：`{"domain":"a.com","ip":"1.2.3.4"}` |
 
 文本端点返回 `ETag` / `Last-Modified`，支持 `If-None-Match` -> 304。  
 无有效 IP 时 `hosts.txt` / `agh.txt` 返回 503（防止 AGH 订阅空清单），`status.json` 视为 200 并说明原因；配置校验、原子写保证关键时刻保留上一轮产物，不写坏文件。
