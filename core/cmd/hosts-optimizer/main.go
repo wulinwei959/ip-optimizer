@@ -18,7 +18,7 @@ import (
 	"hosts-optimizer/internal/logbuf"
 )
 
-const version = "1.0.11"
+const version = "1.0.12"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)

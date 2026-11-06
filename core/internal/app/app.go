@@ -1357,23 +1357,28 @@ summary::marker{color:var(--accent)}
 #selCount{font-size:13px;color:var(--muted)}
 .select-cell{width:42px}
 .select-cell input{width:15px;height:15px;accent-color:var(--accent);cursor:pointer;margin:0}
-.modal-overlay{display:none;position:fixed;inset:0;background:rgba(17,24,39,.45);z-index:100;align-items:center;justify-content:center;padding:16px}
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(17,24,39,.55);z-index:100;align-items:center;justify-content:center;padding:20px}
 .modal-overlay.show{display:flex}
-.modal{background:#fff;border-radius:12px;padding:24px;width:90%;max-width:560px;max-height:82vh;overflow:auto;box-shadow:0 20px 50px rgba(16,24,40,.25)}
-.modal h3{margin:0 0 16px;font-size:16px}
-.modal .progress{margin:12px 0;height:6px;background:#eef1f6;border-radius:3px;overflow:hidden}
-.modal .progress-bar{height:100%;width:0%;background:var(--accent);transition:width .3s}
-.modal .result-list{max-height:320px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:8px;margin-top:12px}
-.modal .result-item{display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:6px;font-size:13px}
-.modal .result-item:hover{background:#f6f8fb}
-.modal .result-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.modal{display:flex;flex-direction:column;background:var(--card,#fff);border:1px solid var(--line);border-radius:12px;padding:20px 22px;width:min(94vw,760px);max-height:84vh;overflow:hidden;box-shadow:0 24px 60px rgba(16,24,40,.35)}
+.modal h3{margin:0 0 12px;font-size:16px;line-height:1.5;word-break:break-all;flex:0 0 auto}
+.modal .progress{margin:0 0 10px;height:6px;flex:0 0 auto;background:#eef1f6;border-radius:3px;overflow:hidden}
+.modal .progress-bar{height:100%;width:0%;background:var(--accent);transition:width .3s,background .3s}
+.modal .modal-hint{margin:0 0 10px;font-size:13px;color:var(--muted);line-height:1.5;flex:0 0 auto;word-break:break-word}
+.modal .result-list{flex:1 1 auto;min-height:140px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:6px;background:var(--surface-2)}
+.modal .result-item{display:flex;align-items:flex-start;gap:10px;padding:9px 10px;border-radius:8px;font-size:13px}
+.modal .result-item + .result-item{border-top:1px solid var(--line)}
+.modal .result-item:hover{background:rgba(37,99,235,.06)}
+.modal .result-dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;margin-top:6px}
 .modal .result-ok .result-dot{background:var(--ok)}
 .modal .result-fail .result-dot{background:#ef4444}
-.modal .result-info{flex:1;min-width:0}
-.modal .result-domain{font-family:ui-monospace,Consolas,monospace;color:#111827}
+.modal .result-main{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:4px}
+.modal .result-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+.modal .result-domain{font-family:ui-monospace,Consolas,monospace;color:var(--text);word-break:break-all;line-height:1.4}
 .modal .result-source{font-size:11px;padding:1px 6px;border-radius:8px}
-.modal .result-ips{color:var(--muted);font-size:12px;font-family:ui-monospace,Consolas,monospace}
-.modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:16px;padding-top:16px;border-top:1px solid var(--line)}
+.modal .result-ips{color:var(--muted);font-size:12px;font-family:ui-monospace,Consolas,monospace;line-height:1.5;word-break:break-all;white-space:normal}
+.modal .result-info{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:3px}
+.modal .modal-empty{display:flex;flex-direction:column;align-items:center;gap:10px;padding:28px 16px;color:var(--muted);font-size:13px;text-align:center}
+.modal-actions{display:flex;flex-wrap:wrap;gap:10px;justify-content:flex-end;margin-top:14px;padding-top:14px;border-top:1px solid var(--line);flex:0 0 auto}
 .table-row-hidden{display:none}
 .group-row td{background:#f7f9fc;padding:0}
 .group-row.open td{background:#eff4fb}
@@ -1695,7 +1700,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
   <div class="modal">
     <h3>展开域名: <span id="modalDomain" style="font-family:monospace;color:var(--accent)"></span></h3>
     <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
-    <p id="progressText" style="font-size:13px;color:var(--muted);margin:8px 0">准备中...</p>
+    <p id="progressText" class="modal-hint">准备中...</p>
     <div class="result-list" id="resultList"></div>
     <div class="modal-actions">
       <button type="button" id="modalClose">关闭</button>
@@ -2622,6 +2627,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
       currentExpandDomain = domain;
       modalDomain.textContent = domain;
       progressBar.style.width = "0%";
+      progressBar.style.background = "";
       progressText.textContent = "正在查询子域名...";
       resultList.innerHTML = "";
       modalAddAll.disabled = true;
@@ -2631,6 +2637,8 @@ tr.domain-row td:nth-child(2){padding-left:32px}
   });
 
   function doExpand(domain) {
+    progressBar.style.width = "0%";
+    progressBar.style.background = "";
     fetch("/api/expand", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2641,6 +2649,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
           progressText.textContent = "失败: " + (j.error || "未知错误");
           progressBar.style.width = "100%";
           progressBar.style.background = "#f44336";
+          renderEmpty("查询失败，请稍后重试", true);
           return;
         }
         expandResults = j.results || [];
@@ -2650,25 +2659,64 @@ tr.domain-row td:nth-child(2){padding-left:32px}
         modalAddAll.disabled = expandResults.length === 0;
       })
       .catch(function(e) {
-        progressText.textContent = "请求失败: " + e;
+        progressText.textContent = "请求失败: " + e.message;
         progressBar.style.width = "100%";
         progressBar.style.background = "#f44336";
+        renderEmpty("网络请求失败，请检查连接后重试", true);
       });
+  }
+
+  function renderEmpty(text, retry) {
+    resultList.innerHTML = "";
+    var box = document.createElement("div");
+    box.className = "modal-empty";
+    var tip = document.createElement("div");
+    tip.textContent = text;
+    box.appendChild(tip);
+    if (retry) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = "重试";
+      btn.onclick = function () {
+        progressText.textContent = "正在重新查询子域名...";
+        resultList.innerHTML = "";
+        doExpand(modalDomain.textContent);
+      };
+      box.appendChild(btn);
+    }
+    resultList.appendChild(box);
   }
 
   function renderResults() {
     resultList.innerHTML = "";
+    if (expandResults.length === 0) {
+      renderEmpty("未发现相关子域名，可稍后重试或更换主域名", false);
+      return;
+    }
     expandResults.forEach(function(r) {
       var item = document.createElement("div");
       item.className = "result-item " + (r.resolved ? "result-ok" : "result-fail");
-      var ips = r.ips && r.ips.length ? r.ips.join(", ") : "\u2014";
-      item.innerHTML =
-        "<span class=\"result-dot\"></span>" +
-        "<div class=\"result-info\">" +
-        "  <div class=\"result-domain\">" + r.domain + "</div>" +
-        "  <span class=\"result-source " + sourceClass(r.source) + "\">" + sourceLabel(r.source) + "</span>" +
-        "</div>" +
-        "<span class=\"result-ips\">" + ips + "</span>";
+      var dot = document.createElement("span");
+      dot.className = "result-dot";
+      var main = document.createElement("div");
+      main.className = "result-main";
+      var line = document.createElement("div");
+      line.className = "result-line";
+      var domain = document.createElement("span");
+      domain.className = "result-domain";
+      domain.textContent = r.domain;
+      var source = document.createElement("span");
+      source.className = "result-source " + sourceClass(r.source);
+      source.textContent = sourceLabel(r.source);
+      line.appendChild(domain);
+      line.appendChild(source);
+      var ips = document.createElement("div");
+      ips.className = "result-ips";
+      ips.textContent = (r.ips && r.ips.length) ? r.ips.join("  ") : "不可解析";
+      main.appendChild(line);
+      main.appendChild(ips);
+      item.appendChild(dot);
+      item.appendChild(main);
       resultList.appendChild(item);
     });
   }
