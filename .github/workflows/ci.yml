@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "feature/**"]
   pull_request:
     branches: [main]
 
@@ -78,7 +78,7 @@ jobs:
 
       - name: Verify static binary
         run: |
-          ldd hosts-optimizer-${{ matrix.platform }} 2>&1 | grep -q "not a dynamic executable" && echo "✅ 纯静态链接" || (echo "❌ 非静态链接" && exit 1)
+          ldd hosts-optimizer-${{ matrix.platform }} 2>&1 | grep -q "not a dynamic executable" && echo "纯静态链接" || (echo "非静态链接" && exit 1)
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
@@ -159,19 +159,19 @@ jobs:
           # 检查 .sh、cmd/* 必须是 LF
           find . -type f \( -name "*.sh" -o -path "./deploy/fnos-native-fpk/cmd/*" \) ! -name "*.fpk" ! -name "*.png" | while read f; do
             if grep -q $'\r' "$f"; then
-              echo "❌ CRLF found: $f"
+              echo "CRLF found: $f"
               exit 1
             fi
           done
-          echo "✅ 所有脚本文件均为 LF"
+          echo "所有脚本文件均为 LF"
 
       - name: Check binary files not treated as text
         run: |
           # .png .fpk 应为 binary
           find . -type f \( -name "*.png" -o -name "*.fpk" \) | while read f; do
             if file "$f" | grep -q "text"; then
-              echo "❌ 二进制文件被当作文本: $f"
+              echo "二进制文件被当作文本: $f"
               exit 1
             fi
           done
-          echo "✅ 二进制文件标记正确"
+          echo "二进制文件标记正确"
