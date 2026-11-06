@@ -22,6 +22,7 @@ import (
 	"hosts-optimizer/internal/config"
 	"hosts-optimizer/internal/dnsquery"
 	"hosts-optimizer/internal/expand"
+	"hosts-optimizer/internal/history"
 	"hosts-optimizer/internal/logbuf"
 	"hosts-optimizer/internal/output"
 	"hosts-optimizer/internal/probe"
@@ -36,6 +37,7 @@ type App struct {
 	hostsPath, aghPath, statusPath, statePath string
 	rootCAs                                   *x509.CertPool
 	state                                     *store.State
+	history                                   history.Store
 
 	mu           sync.RWMutex
 	snap         *output.Snapshot
@@ -83,6 +85,10 @@ func New(rt *config.Runtime) (*App, error) {
 	if corrupted {
 		log.Printf("警告: %v", err)
 	}
+	hs, err := history.Open(filepath.Join(rt.StateDir, "history"), rt.Config.Defaults.HistoryRetentionMonths)
+	if err != nil {
+		log.Printf("历史存储不可用（服务继续运行）: %v", err)
+	}
 	a := &App{
 		port:         rt.Port,
 		configPath:   filepath.Join(rt.ConfigDir, "domains.json"),
@@ -92,6 +98,7 @@ func New(rt *config.Runtime) (*App, error) {
 		statePath:    filepath.Join(rt.StateDir, "state.json"),
 		rootCAs:      pool,
 		state:        st,
+		history:      hs,
 		lastSchedule: rt.Config.Defaults.ScheduleMinutes,
 	}
 	a.recoverSnapshot()
@@ -264,6 +271,20 @@ func (a *App) doRound(ctx context.Context) (int, error) {
 	}
 
 	now := time.Now()
+	if a.history != nil {
+		roundID := fmt.Sprintf("r%d", started.UnixNano())
+		records := make([]history.Record, 0, len(entries))
+		for _, e := range entries {
+			records = append(records, history.Record{
+				Time: now, RoundID: roundID, Domain: e.Name, Group: history.BaseDomain(e.Name),
+				IP: e.IP, LatencyMS: e.LatencyMS, Candidates: e.Candidates,
+				Validated: e.Validated > 0, Reason: e.Reason,
+			})
+		}
+		if err := a.history.Append(records); err != nil {
+			log.Printf("写入历史失败: %v", err)
+		}
+	}
 	round := output.RoundInfo{
 		StartedAt: started, FinishedAt: now, OK: true,
 		ScheduleMinutes: d.ScheduleMinutes,
@@ -320,6 +341,8 @@ func (a *App) handle(w http.ResponseWriter, r *http.Request) {
 		a.handleExpand(w, r)
 	case "/api/logs":
 		a.handleLogs(w, r)
+	case "/api/history":
+		a.handleHistory(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -606,6 +629,72 @@ func (a *App) handleLogs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleHistory 查询探测历史；支持 domain/group/from/to/limit。
+func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "仅支持 GET"})
+		return
+	}
+	if a.history == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "历史存储不可用"})
+		return
+	}
+	q := r.URL.Query()
+	from, err := parseHistoryTime(q.Get("from"), true)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	to, err := parseHistoryTime(q.Get("to"), false)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	limit := 500
+	if v := q.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "limit 必须是正整数"})
+			return
+		}
+		if n > 5000 {
+			n = 5000
+		}
+		limit = n
+	}
+	records, err := a.history.Query(history.Filter{
+		Domain: strings.TrimSpace(q.Get("domain")),
+		Group:  strings.TrimSpace(q.Get("group")),
+		From:   from, To: to, Limit: limit,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "查询历史失败: " + err.Error()})
+		return
+	}
+	if records == nil {
+		records = []history.Record{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "records": records, "count": len(records)})
+}
+
+func parseHistoryTime(v string, isFrom bool) (time.Time, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return time.Time{}, nil
+	}
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t, nil
+	}
+	if t, err := time.ParseInLocation("2006-01-02", v, time.Local); err == nil {
+		if !isFrom {
+			t = t.Add(24*time.Hour - time.Nanosecond)
+		}
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("时间格式应为 RFC3339 或 YYYY-MM-DD: %q", v)
+}
+
 // parseExpandSources 校验并去重展开来源，空列表表示使用全局默认。
 func parseExpandSources(values []string) ([]expand.Source, error) {
 	out := make([]expand.Source, 0, len(values))
@@ -825,6 +914,22 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 #logView .log-line{display:block}
 #logView .log-time{color:var(--muted);margin-right:8px}
 #logState{font-size:13px;color:var(--muted)}
+.history-tools{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:10px 0}
+#historyDomain{min-width:180px}
+#historyRange{min-width:130px}
+#historyState{font-size:13px;color:var(--muted)}
+.trend-wrap{margin:6px 0 14px}
+#trendChart{width:100%;height:220px;display:block}
+.trend-grid{stroke:var(--line);stroke-width:1}
+.trend-label{fill:var(--muted);font-size:11px}
+.trend-line{fill:none;stroke:var(--accent);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.trend-dot{fill:var(--accent)}
+.trend-area{fill:var(--accent);opacity:.10;stroke:none}
+.history-table-wrap{max-height:320px;overflow:auto;border:1px solid var(--line);border-radius:8px}
+.history-table{width:100%;font-size:13px}
+.history-table th{position:sticky;top:0;z-index:1}
+.history-table td,.history-table th{padding:8px 10px}
+.history-empty{padding:16px;text-align:center;color:var(--muted);font-size:13px}
 </style>
 <script>
 (function(){try{var m=localStorage.getItem("ho-theme")||"system";var d=m==="dark"||(m==="system"&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.setAttribute("data-theme",d?"dark":"light");}catch(e){}})();
@@ -934,6 +1039,15 @@ tr.domain-row td:nth-child(2){padding-left:32px}
       </div>
     </div>
   </details>
+  <details class="cfg-section">
+    <summary>历史记录</summary>
+    <div class="cfg-body">
+      <div class="field-grid">
+        <label>历史保留（月）<input id="fHistoryRetention" type="number" min="1" max="120"></label>
+      </div>
+      <p class="hint" style="margin:8px 0 0">探测历史按月压缩存于状态目录的 history/ 下，超出保留期的分片会自动清理。</p>
+    </div>
+  </details>
 </div>
 
 <div id="cfgJSONWrap" class="cfg-json-wrap">
@@ -991,6 +1105,30 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 {{end}}
 </tbody></table>
 
+</div>
+
+<div class="card">
+<details id="historyDetails">
+<summary>历史趋势</summary>
+<div class="history-tools">
+  <select id="historyDomain"></select>
+  <select id="historyRange">
+    <option value="1">近 24 小时</option>
+    <option value="7" selected>近 7 天</option>
+    <option value="30">近 30 天</option>
+    <option value="90">近 90 天</option>
+  </select>
+  <button id="historyRefresh" type="button">刷新</button>
+  <span id="historyState"></span>
+</div>
+<div class="trend-wrap"><svg id="trendChart" viewBox="0 0 720 220" role="img" aria-label="平均延迟趋势"></svg></div>
+<div class="history-table-wrap">
+  <table class="history-table">
+    <thead><tr><th>时间</th><th>域名</th><th>优选 IP</th><th>延迟</th><th>状态</th></tr></thead>
+    <tbody id="historyRows"></tbody>
+  </table>
+</div>
+</details>
 </div>
 
 <div class="card">
@@ -1196,6 +1334,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
     numTo(document.getElementById("fExpandConcurrency"), d.expand_concurrency, 10);
     numTo(document.getElementById("fExpandTimeout"), d.expand_timeout_seconds, 10);
     numTo(document.getElementById("fExpandMax"), d.expand_max_subdomains, 50);
+    numTo(document.getElementById("fHistoryRetention"), d.history_retention_months, 12);
     var dnsList = (d.probe_dns && d.probe_dns.length) ? d.probe_dns : ["223.5.5.5", "119.29.29.29"];
     document.getElementById("fProbeDNS").value = dnsList.join(", ");
     var srcs = (d.expand_sources && d.expand_sources.length) ? d.expand_sources : ["wordlist", "rules"];
@@ -1239,6 +1378,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
     setNum(d, "expand_concurrency", document.getElementById("fExpandConcurrency"), 10);
     setNum(d, "expand_timeout_seconds", document.getElementById("fExpandTimeout"), 10);
     setNum(d, "expand_max_subdomains", document.getElementById("fExpandMax"), 50);
+    setNum(d, "history_retention_months", document.getElementById("fHistoryRetention"), 12);
     var dns = splitList(document.getElementById("fProbeDNS").value);
     d.probe_dns = dns.length ? dns : ["223.5.5.5", "119.29.29.29"];
     var srcs = [];
@@ -1891,6 +2031,186 @@ tr.domain-row td:nth-child(2){padding-left:32px}
         rowBtn.textContent = "刷新";
       });
     };
+  });
+
+  // 历史趋势：近 N 天平均延迟 + 最近记录
+  var historyDetails = document.getElementById("historyDetails");
+  var historyDomain = document.getElementById("historyDomain");
+  var historyRange = document.getElementById("historyRange");
+  var historyRefresh = document.getElementById("historyRefresh");
+  var historyState = document.getElementById("historyState");
+  var historyRows = document.getElementById("historyRows");
+  var trendChart = document.getElementById("trendChart");
+  var SVGNS = "http://www.w3.org/2000/svg";
+
+  function initHistoryDomains() {
+    var seen = {};
+    var names = [];
+    rows.forEach(function (tr) {
+      var n = tr.dataset.name;
+      if (n && !seen[n]) { seen[n] = true; names.push(n); }
+    });
+    names.sort();
+    var all = document.createElement("option");
+    all.value = "";
+    all.textContent = "全部域名";
+    historyDomain.appendChild(all);
+    names.forEach(function (n) {
+      var opt = document.createElement("option");
+      opt.value = n;
+      opt.textContent = n;
+      historyDomain.appendChild(opt);
+    });
+  }
+
+  function fmtLocal(iso, withDate) {
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return String(iso);
+    function p(n) { return n < 10 ? "0" + n : "" + n; }
+    var time = p(d.getHours()) + ":" + p(d.getMinutes());
+    return withDate ? (d.getMonth() + 1) + "-" + p(d.getDate()) + " " + time : time;
+  }
+
+  function svgEl(tag, attrs) {
+    var el = document.createElementNS(SVGNS, tag);
+    Object.keys(attrs || {}).forEach(function (k) { el.setAttribute(k, attrs[k]); });
+    return el;
+  }
+
+  function renderTrend(records, days) {
+    trendChart.textContent = "";
+    var W = 720, H = 220, L = 46, R = 14, T = 16, B = 28;
+    var now = new Date();
+    var from = new Date(now.getTime() - days * 86400000);
+    var sizeMs = days <= 1 ? 3600000 : (days <= 7 ? 6 * 3600000 : (days <= 30 ? 86400000 : 3 * 86400000));
+    var bucketCount = Math.max(1, Math.ceil((now - from) / sizeMs));
+    var sums = new Array(bucketCount).fill(0);
+    var counts = new Array(bucketCount).fill(0);
+    records.forEach(function (r) {
+      if (!r.validated || !r.latency_ms) return;
+      var t = new Date(r.time).getTime();
+      if (isNaN(t) || t < from.getTime() || t > now.getTime()) return;
+      var idx = Math.floor((t - from.getTime()) / sizeMs);
+      if (idx < 0) idx = 0;
+      if (idx >= bucketCount) idx = bucketCount - 1;
+      sums[idx] += r.latency_ms;
+      counts[idx]++;
+    });
+    var avgs = [];
+    var maxAvg = 0;
+    for (var i = 0; i < bucketCount; i++) {
+      var v = counts[i] ? sums[i] / counts[i] : null;
+      avgs.push(v);
+      if (v !== null && v > maxAvg) maxAvg = v;
+    }
+    var maxY = Math.max(10, Math.ceil(maxAvg * 1.2 / 10) * 10);
+
+    var plotW = W - L - R, plotH = H - T - B;
+    function x(i) { return L + (bucketCount === 1 ? plotW / 2 : (i / (bucketCount - 1)) * plotW); }
+    function y(v) { return T + plotH - (v / maxY) * plotH; }
+
+    for (var g = 0; g <= 3; g++) {
+      var gv = maxY * g / 3;
+      var gy = y(gv);
+      trendChart.appendChild(svgEl("line", { x1: L, y1: gy, x2: W - R, y2: gy, class: "trend-grid" }));
+      var label = svgEl("text", { x: L - 8, y: gy + 4, class: "trend-label", "text-anchor": "end" });
+      label.textContent = Math.round(gv) + "ms";
+      trendChart.appendChild(label);
+    }
+
+    var d = "", started = false;
+    for (var j = 0; j < bucketCount; j++) {
+      if (avgs[j] === null) { started = false; continue; }
+      d += (started ? " L" : " M") + x(j).toFixed(1) + " " + y(avgs[j]).toFixed(1);
+      started = true;
+      trendChart.appendChild(svgEl("circle", { cx: x(j), cy: y(avgs[j]), r: 3, class: "trend-dot" }));
+    }
+    if (d) {
+      trendChart.appendChild(svgEl("path", { d: d, class: "trend-line" }));
+    } else {
+      var empty = svgEl("text", { x: W / 2, y: H / 2, class: "trend-label", "text-anchor": "middle" });
+      empty.textContent = "暂无历史数据";
+      trendChart.appendChild(empty);
+    }
+
+    var ticks = 4;
+    for (var k = 0; k < ticks; k++) {
+      var ts = from.getTime() + (now.getTime() - from.getTime()) * (k / (ticks - 1));
+      var td = new Date(ts);
+      var lbl = svgEl("text", {
+        x: L + (k / (ticks - 1)) * plotW, y: H - 8, class: "trend-label",
+        "text-anchor": k === 0 ? "start" : (k === ticks - 1 ? "end" : "middle")
+      });
+      lbl.textContent = days <= 1 ? fmtLocal(td.toISOString(), false) : (td.getMonth() + 1) + "-" + td.getDate();
+      trendChart.appendChild(lbl);
+    }
+  }
+
+  function renderHistoryRows(records) {
+    var list = records.slice(-100).reverse();
+    historyRows.textContent = "";
+    if (list.length === 0) {
+      var tr = document.createElement("tr");
+      var td = document.createElement("td");
+      td.colSpan = 5;
+      td.className = "history-empty";
+      td.textContent = "暂无历史记录";
+      tr.appendChild(td);
+      historyRows.appendChild(tr);
+      return;
+    }
+    list.forEach(function (r) {
+      var tr = document.createElement("tr");
+      var cells = [
+        fmtLocal(r.time, true),
+        r.domain,
+        r.ip || "—",
+        r.latency_ms ? Math.round(r.latency_ms * 10) / 10 + " ms" : "—"
+      ];
+      cells.forEach(function (text) {
+        var td = document.createElement("td");
+        td.textContent = text;
+        tr.appendChild(td);
+      });
+      var st = document.createElement("td");
+      var dot = document.createElement("span");
+      dot.className = "status-dot " + (r.validated ? "status-ok" : "status-fail");
+      st.appendChild(dot);
+      st.appendChild(document.createTextNode(r.validated ? "正常" : "失败"));
+      tr.appendChild(st);
+      historyRows.appendChild(tr);
+    });
+  }
+
+  function fetchHistory() {
+    var days = parseInt(historyRange.value, 10) || 7;
+    var now = new Date();
+    var from = new Date(now.getTime() - days * 86400000);
+    var url = "/api/history?from=" + encodeURIComponent(from.toISOString()) +
+      "&to=" + encodeURIComponent(now.toISOString()) + "&limit=5000";
+    if (historyDomain.value) url += "&domain=" + encodeURIComponent(historyDomain.value);
+    historyState.textContent = "加载中...";
+    fetch(url)
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j.ok) {
+          historyState.textContent = "加载失败: " + (j.error || "未知错误");
+          return;
+        }
+        var records = j.records || [];
+        renderTrend(records, days);
+        renderHistoryRows(records);
+        historyState.textContent = "共 " + records.length + " 条记录";
+      })
+      .catch(function (e) { historyState.textContent = "加载失败: " + e; });
+  }
+
+  initHistoryDomains();
+  historyRefresh.onclick = fetchHistory;
+  historyRange.onchange = fetchHistory;
+  historyDomain.onchange = fetchHistory;
+  historyDetails.addEventListener("toggle", function () {
+    if (historyDetails.open) fetchHistory();
   });
 
   // 运行日志：增量拉取 + 关键字筛选

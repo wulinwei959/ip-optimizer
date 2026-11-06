@@ -35,21 +35,22 @@ type Domain struct {
 
 // Defaults 是全局默认值，可被单个域名覆盖。
 type Defaults struct {
-	ScheduleMinutes      int      `json:"schedule_minutes"`
-	ProbeDNS             []string `json:"probe_dns"`
-	ProbePort            int      `json:"probe_port"`
-	Concurrency          int      `json:"concurrency"`
-	HysteresisPercent    int      `json:"hysteresis_percent"`
-	HysteresisRounds     int      `json:"hysteresis_rounds"`
-	ExpectStatus         []int    `json:"expect_status"`
-	Outputs              []string `json:"outputs"`
-	MaxCandidates        int      `json:"max_candidates"`
-	TCPRounds            int      `json:"tcp_rounds"`
-	TimeoutSeconds       int      `json:"timeout_seconds"`
-	ExpandConcurrency    int      `json:"expand_concurrency"`
-	ExpandTimeoutSeconds int      `json:"expand_timeout_seconds"`
-	ExpandMaxSubdomains  int      `json:"expand_max_subdomains"`
-	ExpandSources        []string `json:"expand_sources"`
+	ScheduleMinutes        int      `json:"schedule_minutes"`
+	ProbeDNS               []string `json:"probe_dns"`
+	ProbePort              int      `json:"probe_port"`
+	Concurrency            int      `json:"concurrency"`
+	HysteresisPercent      int      `json:"hysteresis_percent"`
+	HysteresisRounds       int      `json:"hysteresis_rounds"`
+	ExpectStatus           []int    `json:"expect_status"`
+	Outputs                []string `json:"outputs"`
+	MaxCandidates          int      `json:"max_candidates"`
+	TCPRounds              int      `json:"tcp_rounds"`
+	TimeoutSeconds         int      `json:"timeout_seconds"`
+	ExpandConcurrency      int      `json:"expand_concurrency"`
+	ExpandTimeoutSeconds   int      `json:"expand_timeout_seconds"`
+	ExpandMaxSubdomains    int      `json:"expand_max_subdomains"`
+	ExpandSources          []string `json:"expand_sources"`
+	HistoryRetentionMonths int      `json:"history_retention_months"`
 }
 
 // Runtime 是一轮探测所需的全部运行时信息。
@@ -186,6 +187,9 @@ func applyDefaults(c *Config) {
 	if len(d.ExpandSources) == 0 {
 		d.ExpandSources = []string{"wordlist", "rules"}
 	}
+	if d.HistoryRetentionMonths <= 0 {
+		d.HistoryRetentionMonths = 12
+	}
 }
 
 func applyEnv(c *Config) error {
@@ -244,6 +248,9 @@ func validate(c *Config) error {
 	}
 	if d.ExpandMaxSubdomains < 1 || d.ExpandMaxSubdomains > 1000 {
 		return fmt.Errorf("expand_max_subdomains 必须在 1..1000，当前 %d", d.ExpandMaxSubdomains)
+	}
+	if d.HistoryRetentionMonths < 1 || d.HistoryRetentionMonths > 120 {
+		return fmt.Errorf("history_retention_months 必须在 1..120，当前 %d", d.HistoryRetentionMonths)
 	}
 	validSources := map[string]bool{"ct": true, "wordlist": true, "rules": true}
 	for _, s := range d.ExpandSources {

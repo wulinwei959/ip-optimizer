@@ -57,7 +57,7 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 
 订阅地址：推荐 `http://<NAS内网IP>:18088/agh.txt`（覆盖子域且 AAAA 天然 NODATA），或 `http://<NAS内网IP>:18088/hosts.txt`。在 AdGuard Home「过滤器 → DNS 封锁清单」添加，更新间隔改为 1 小时。安装后也可从桌面图标打开的状态页一键复制订阅地址。
 
-打包校验要求：`manifest`、`config/privilege`(JSON)、`config/resource`(JSON)、`ICON.PNG`(64×64)、`ICON_256.PNG`(256×256)、`app/`、`cmd/`、`wizard/` 齐全。骨架已生成占位图标，**发布前替换**。
+打包校验要求：`manifest`、`config/privilege`(JSON)、`config/resource`(JSON)、`ICON.PNG`(64×64)、`ICON_256.PNG`(256×256)、`app/`、`cmd/`、`wizard/` 齐全。图标已替换为正式版本，修改时从 `deploy/icon-source.png` 重新导出 64/256 两档。
 
 ## 核心必须遵守的接口契约
 
@@ -123,6 +123,8 @@ curl -X POST http://127.0.0.1:18088/refresh
 **1.0.4 变更**：`probe_dns` 支持 DoT（`tls://`）与 DoH（`https://`）加密上游，可与 UDP 混用；配置页直接填写并校验。DoQ 需要第三方 QUIC 库，按零依赖约束不支持。
 
 **1.0.5 变更**：新增主题跟随系统与手动切换（浅色/深色/跟随系统）；新增应用内实时运行日志面板（增量拉取、暂停自动刷新、关键字筛选）；发布者与开发者统一为 `wulinwei959`，主页指向 GitHub 仓库。
+
+**1.0.6 变更**：新增探测历史存储（`history/rounds-YYYYMM.jsonl.gz`，按月 gzip 分片，保留期可配置）与历史趋势图；应用图标替换为蓝底地球 + 绿色闪电，1024 源图见 `deploy/icon-source.png`。
 
 **仍需**：
 

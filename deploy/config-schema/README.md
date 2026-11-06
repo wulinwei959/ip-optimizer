@@ -44,6 +44,7 @@
 | `expand_timeout_seconds` | int | 10 | 域名展开单次超时 (1..60) |
 | `expand_max_subdomains` | int | 50 | 域名展开最大子域名数 (1..1000) |
 | `expand_sources` | string[] | ["wordlist", "rules"] | 全局默认展开来源 |
+| `history_retention_months` | int | 12 | 探测历史保留月数 (1..120)，过期分片自动清理 |
 
 `HO_SCHEDULE_MINUTES`、`HO_PROBE_DNS`、`HO_PROBE_CONCURRENCY` 可覆盖 `defaults`；`HO_PORT` / `HO_TZ` / `HO_CA_BUNDLE` / `HO_CONFIG` / `HO_OUTPUT` / `HO_STATE` 见 `deploy/README.md`。
 
@@ -60,6 +61,7 @@
 | `GET /api/domains` | 读取 domains.json 原文 |
 | `PUT/POST /api/domains` | 写入 domains.json（校验后原子写入） |
 | `POST /api/expand` | 域名展开：`{ "domain": "github.com", "sources": ["wordlist", "rules"] }` |
+| `GET /api/history` | 查询探测历史，支持 `domain`、`group`、`from`、`to`、`limit` |
 
 文本端点返回 `ETag` / `Last-Modified`，支持 `If-None-Match` -> 304。  
 无有效 IP 时 `hosts.txt` / `agh.txt` 返回 503（防止 AGH 订阅空清单），`status.json` 视为 200 并说明原因；配置校验、原子写保证关键时刻保留上一轮产物，不写坏文件。

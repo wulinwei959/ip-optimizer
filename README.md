@@ -54,6 +54,7 @@ AdGuard Home 订阅
 - **加密 DNS 上游**：`probe_dns` 支持 UDP、DoT、DoH 混用，例如 `tls://dns.alidns.com`、`https://dns.cloudflare.com/dns-query`；DoQ 需第三方 QUIC 库，未引入。
 - **主题跟随系统**：默认跟随系统的深/浅色设置，也可在页面手动切换「浅色 / 深色 / 跟随系统」，选择保存在浏览器本地。
 - **应用内运行日志**：页面底部提供日志面板，内存保留最近 2000 行，支持增量刷新、暂停自动刷新、关键字筛选与清空视图，便于实时排查。
+- **历史趋势**：每轮探测结果按月写入 `history/rounds-YYYYMM.jsonl.gz`（gzip 压缩），默认保留 12 个月；页面可按域名与时间范围查看平均延迟趋势和最近记录。
 - **异步刷新**：`POST /refresh` 立即返回 `task_id` 并在后台执行，页面轮询 `/api/refresh-status` 显示进度，长时间探测不再阻塞请求。
 - **fnOS 桌面入口**：桌面图标以 iframe 窗口打开状态页，可查看生效 IP / 延迟、一键复制订阅地址、点「立即刷新」触发新一轮；表格支持勾选与批量删除。
 
@@ -190,6 +191,7 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 | `POST /refresh` | 提交后台刷新任务，立即返回 `202` 与 `{"ok":true,"task_id":"r..."}`；已有任务在跑时复用 |
 | `GET /api/refresh-status?task_id=...` | 查询刷新进度：`state` 为 `running` / `done` / `error`，完成时带 `next_round_minutes` |
 | `GET /api/logs?after=<seq>&limit=<n>` | 增量读取运行日志，返回 `entries` 与 `last_seq`；缓冲上限 2000 行 |
+| `GET /api/history?domain=&group=&from=&to=&limit=` | 查询探测历史；`from`/`to` 支持 RFC3339 或 `YYYY-MM-DD`，默认最近 7 天，`limit` 上限 5000 |
 | `GET /api/domains` | 读取 `domains.json` 原文 |
 | `PUT /api/domains` | 校验并原子写回 `domains.json`（要求 `Content-Type: application/json`） |
 | `POST /api/expand` | 按需发现主域名的相关子域名，返回解析结果（不修改配置） |
@@ -216,7 +218,7 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 .
 ├── core/                          # Go 核心（仅标准库）
 │   ├── cmd/hosts-optimizer/       # 入口：-version / -check-config / 服务
-│   └── internal/{config,dnsquery,probe,store,output,app,util}
+│   └── internal/{config,dnsquery,probe,store,output,app,util,history,logbuf}
 ├── deploy/
 │   ├── fnos-native-fpk/           # 主轨：fnOS 纯原生 FPK 源工程
 │   │   ├── manifest
@@ -234,6 +236,12 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 ├── .gitignore / .gitattributes
 └── README.md
 ```
+
+运行时数据（fnOS 原生包）：
+
+- 配置：`/vol1/@appconf/hosts-optimizer-native/domains.json`
+- 产物：`/vol1/@appdata/hosts-optimizer-native/output/`
+- 状态与历史：`/vol1/@appdata/hosts-optimizer-native/state/`（`state.json` + `history/rounds-YYYYMM.jsonl.gz`）
 
 ---
 
@@ -262,6 +270,7 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 - **真机 1.0.3**：卸载重装后配置与产物保留；状态表按主域名分组（如 `cloudflare.com` 7 个、`github.com`、`githubusercontent.com` 等），分组展开/收起与整组勾选正常；图形化表单正确带出轮询周期 60、端口 443、并发 20、候选 64、TCP 3 轮、超时 3 秒等参数，域名列表可编辑。
 - **真机 1.0.4**：把 `probe_dns` 临时改为 `https://dns.alidns.com/dns-query` + `tls://dns.alidns.com`，一轮约 75 秒完成，17/18 域名生效且候选数正常，验证后已恢复原配置；`quic://` 地址被配置校验拒绝并返回明确提示。
 - **真机 1.0.5**：页面默认跟随系统显示深色主题，手动切换浅色/深色后刷新仍保持；运行日志面板显示启动与探测日志（增量序号正常），关键字筛选可用；FPK manifest 的 `maintainer` / `distributor` 均为 `wulinwei959`，链接指向项目 GitHub。
+- **真机 1.0.6**：启动轮次自动写入 `history/rounds-202611.jsonl.gz`，两轮共 36 条记录；页面历史趋势可按域名与时间范围查询，平均延迟曲线与最近记录正常；重装后历史保留；FPK 内 64/256 图标尺寸正确。
 
 **待验证 / 已知限制**
 
