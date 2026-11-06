@@ -78,7 +78,7 @@ jobs:
 
       - name: Verify static binary
         run: |
-          ldd hosts-optimizer-${{ matrix.platform }} 2>&1 | grep -q "not a dynamic executable" && echo "pure static" || (echo "not static" && exit 1)
+          file hosts-optimizer-${{ matrix.platform }} | grep -q "statically linked"
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
@@ -133,12 +133,17 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: false
 
+      - name: Prepare schema config
+        run: |
+          mkdir -p /tmp/ho-config
+          cp deploy/config-schema/domains.example.json /tmp/ho-config/domains.json
+
       - name: Test config parsing
         run: |
           cd core
           GOPROXY=off GOSUMDB=off CGO_ENABLED=0 go run ./cmd/hosts-optimizer -check-config
         env:
-          HO_CONFIG: ${{ github.workspace }}/deploy/config-schema
+          HO_CONFIG: /tmp/ho-config
           HO_OUTPUT: /tmp/ho-out
           HO_STATE: /tmp/ho-state
           HO_PORT: 18088
