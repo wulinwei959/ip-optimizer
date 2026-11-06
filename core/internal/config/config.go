@@ -31,6 +31,7 @@ type Domain struct {
 	AllowPrivate  bool     `json:"allow_private"`
 	Expand        bool     `json:"expand"`
 	ExpandSources []string `json:"expand_sources"`
+	Disabled      bool     `json:"disabled"`
 }
 
 // Defaults 是全局默认值，可被单个域名覆盖。
@@ -78,6 +79,7 @@ type Target struct {
 	ExpandConcurrency   int
 	ExpandTimeout       int
 	ExpandMaxSubdomains int
+	Disabled            bool
 }
 
 func envOr(key, def string) string {
@@ -106,6 +108,8 @@ func Parse(data []byte) (Config, error) {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return Config{}, err
 	}
+	// 与运行时 Load 保持一致：缺省字段先补默认值再校验，避免可选字段缺失被误判为非法。
+	applyDefaults(&c)
 	if err := validate(&c); err != nil {
 		return Config{}, err
 	}
@@ -330,5 +334,6 @@ func (c *Config) Resolve(d Domain) Target {
 			t.ExpandSources = append([]string(nil), d.ExpandSources...)
 		}
 	}
+	t.Disabled = d.Disabled
 	return t
 }

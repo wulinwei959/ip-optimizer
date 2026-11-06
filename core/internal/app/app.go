@@ -41,6 +41,7 @@ type App struct {
 	state                                     *store.State
 	stateMu                                   sync.RWMutex
 	history                                   history.Store
+	version                                   string
 
 	mu           sync.RWMutex
 	snap         *output.Snapshot
@@ -71,7 +72,7 @@ type refreshTask struct {
 }
 
 // New 初始化目录、CA 池、状态，并尝试从磁盘恢复上一轮产物。
-func New(rt *config.Runtime) (*App, error) {
+func New(rt *config.Runtime, version string) (*App, error) {
 	if err := os.MkdirAll(rt.OutputDir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建产物目录失败: %w", err)
 	}
@@ -103,6 +104,7 @@ func New(rt *config.Runtime) (*App, error) {
 		rootCAs:      pool,
 		state:        st,
 		history:      hs,
+		version:      version,
 		lastSchedule: rt.Config.Defaults.ScheduleMinutes,
 	}
 	a.recoverSnapshot()
@@ -226,8 +228,13 @@ func (a *App) doRoundFor(ctx context.Context, only map[string]bool) (int, error)
 
 	targets := make([]config.Target, 0, len(rt.Config.Domains))
 	seen := make(map[string]bool, len(rt.Config.Domains))
+	disabled := make(map[string]bool, len(rt.Config.Domains))
 	for _, dom := range rt.Config.Domains {
 		t := rt.Config.Resolve(dom)
+		if t.Disabled {
+			disabled[t.Name] = true
+			continue
+		}
 		if seen[t.Name] {
 			continue
 		}
@@ -251,6 +258,11 @@ func (a *App) doRoundFor(ctx context.Context, only map[string]bool) (int, error)
 			}
 		}
 	} else {
+		for name := range only {
+			if disabled[name] {
+				delete(only, name)
+			}
+		}
 		targets = selectTargets(targets, only, d)
 	}
 
@@ -385,7 +397,16 @@ func mergeEntries(existing []output.StatusDomain, refreshed []output.Entry) []ou
 
 // writeSnapshot 原子写入三份产物；整轮全灭且已有旧产物时保留旧文件。
 func (a *App) writeSnapshot(snap *output.Snapshot) error {
-	if snap.Ready {
+	return a.writeSnapshotMode(snap, false)
+}
+
+// writeSnapshotForce 强制写入三份产物，用于用户显式禁用/删除等主动操作。
+func (a *App) writeSnapshotForce(snap *output.Snapshot) error {
+	return a.writeSnapshotMode(snap, true)
+}
+
+func (a *App) writeSnapshotMode(snap *output.Snapshot, force bool) error {
+	if snap.Ready || force {
 		if err := util.AtomicWrite(a.hostsPath, snap.Hosts); err != nil {
 			return err
 		}
@@ -449,6 +470,8 @@ func (a *App) handle(w http.ResponseWriter, r *http.Request) {
 		a.handleSwitch(w, r)
 	case "/api/refresh-agh":
 		a.handleRefreshAGH(w, r)
+	case "/api/disable":
+		a.handleDisable(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -644,7 +667,8 @@ func (a *App) handleDomainsConfig(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "请求体为空"})
 			return
 		}
-		if _, err := config.Parse(body); err != nil {
+		parsed, err := config.Parse(body)
+		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
@@ -653,6 +677,18 @@ func (a *App) handleDomainsConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		log.Printf("配置已更新: %s（%d 字节）", a.configPath, len(body))
+		// 保存后立即把禁用域名从产物中移除，避免页面显示禁用但订阅仍在生效。
+		disabledNames := make(map[string]bool)
+		for _, d := range parsed.Domains {
+			if d.Disabled {
+				disabledNames[strings.ToLower(strings.TrimSpace(d.Name))] = true
+			}
+		}
+		if len(disabledNames) > 0 {
+			if err := a.removeFromSnapshot(disabledNames); err != nil {
+				log.Printf("移除禁用域名失败: %v", err)
+			}
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "bytes": len(body), "path": a.configPath})
 
 	default:
@@ -1049,6 +1085,149 @@ func (a *App) handleRefreshAGH(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "bytes": n})
 }
 
+// handleDisable 批量启用/禁用域名，立即写回配置并从产物中移除被禁用的域名。
+// 请求体：{"names":["a.com"],"disabled":true}，或 {"group":"github.com","disabled":true}。
+func (a *App) handleDisable(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "仅支持 POST"})
+		return
+	}
+	if !strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+		writeJSON(w, http.StatusUnsupportedMediaType, map[string]any{"ok": false, "error": "需要 Content-Type: application/json"})
+		return
+	}
+	var req struct {
+		Names    []string `json:"names"`
+		Group    string   `json:"group"`
+		Disabled bool     `json:"disabled"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "解析请求失败: " + err.Error()})
+		return
+	}
+	group := strings.ToLower(strings.TrimSpace(req.Group))
+	wanted := make(map[string]bool, len(req.Names))
+	for _, n := range normalizeDomainNames(req.Names) {
+		wanted[n] = true
+	}
+	if group == "" && len(wanted) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "names 或 group 至少提供一个"})
+		return
+	}
+
+	a.roundMu.Lock()
+	defer a.roundMu.Unlock()
+
+	raw, err := os.ReadFile(a.configPath)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "读取配置失败: " + err.Error()})
+		return
+	}
+	// 用 map 修改，保留用户原有字段与格式，避免把缺省字段写成零值。
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "解析配置失败: " + err.Error()})
+		return
+	}
+	if root == nil {
+		root = map[string]any{}
+	}
+	domainsRaw, _ := root["domains"].([]any)
+
+	changed := 0
+	affected := make(map[string]bool)
+	for _, item := range domainsRaw {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		rawName, _ := m["name"].(string)
+		name := strings.ToLower(strings.TrimSpace(rawName))
+		if name == "" {
+			continue
+		}
+		match := wanted[name]
+		if !match && group != "" {
+			match = history.BaseDomain(name) == group
+		}
+		if !match {
+			continue
+		}
+		affected[name] = true
+		cur, _ := m["disabled"].(bool)
+		if cur != req.Disabled {
+			if req.Disabled {
+				m["disabled"] = true
+			} else {
+				delete(m, "disabled")
+			}
+			changed++
+		}
+	}
+	if changed == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "changed": 0, "names": len(affected)})
+		return
+	}
+	out, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "序列化配置失败: " + err.Error()})
+		return
+	}
+	out = append(out, '\n')
+	if _, err := config.Parse(out); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "配置校验失败: " + err.Error()})
+		return
+	}
+	if err := util.AtomicWrite(a.configPath, out); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "写入配置失败: " + err.Error()})
+		return
+	}
+	log.Printf("已%s %d 个域名（配置已更新）", map[bool]string{true: "禁用", false: "启用"}[req.Disabled], changed)
+
+	if req.Disabled {
+		if err := a.removeFromSnapshot(affected); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "changed": changed, "names": len(affected)})
+}
+
+// removeFromSnapshot 从当前快照与产物中移除指定域名，不触发重新探测。
+func (a *App) removeFromSnapshot(names map[string]bool) error {
+	a.mu.RLock()
+	snap := a.snap
+	a.mu.RUnlock()
+	if snap == nil {
+		return nil
+	}
+	entries := statusToEntries(snap.Status.Domains)
+	kept := entries[:0]
+	for _, e := range entries {
+		if names[e.Name] {
+			continue
+		}
+		kept = append(kept, e)
+	}
+	now := time.Now()
+	round := output.RoundInfo{
+		StartedAt: snap.Status.GeneratedAt, FinishedAt: now, OK: true,
+		ScheduleMinutes: snap.Status.ScheduleMinutes,
+	}
+	built, err := output.Build(kept, now, round)
+	if err != nil {
+		return fmt.Errorf("生成产物失败: %w", err)
+	}
+	if err := a.writeSnapshotForce(built); err != nil {
+		return fmt.Errorf("写入产物失败: %w", err)
+	}
+	a.mu.Lock()
+	a.snap = built
+	a.mu.Unlock()
+	return nil
+}
+
 // parseExpandSources 校验并去重展开来源，空列表表示使用全局默认。
 func parseExpandSources(values []string) ([]expand.Source, error) {
 	out := make([]expand.Source, 0, len(values))
@@ -1075,23 +1254,27 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 var indexTmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>hosts-optimizer</title>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>Hosts 优选订阅</title>
 <style>
-:root{--bg:#f4f6f9;--card:#fff;--line:#e5e8ee;--text:#1f2937;--muted:#6b7280;--accent:#2563eb;--accent-dark:#1d4ed8;--danger:#dc2626;--ok:#16a34a;--surface-2:#f8fafc;--radius:12px}
+:root{--bg:#f4f6f9;--card:#fff;--line:#e5e8ee;--text:#1f2937;--muted:#6b7280;--accent:#2563eb;--accent-dark:#1d4ed8;--danger:#dc2626;--ok:#16a34a;--surface-2:#f8fafc;--radius:14px;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",system-ui,sans-serif}
 *{box-sizing:border-box}
-body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;background:var(--bg);color:var(--text);max-width:1180px;margin:0 auto;padding:30px 20px 56px;line-height:1.65}
-h1{font-size:30px;letter-spacing:-.02em;margin:0 0 8px}
-.sub{color:var(--muted);font-size:14px;margin:0 0 2px}
+body{font-family:var(--sans);background:var(--bg);color:var(--text);max-width:1180px;margin:0 auto;padding:30px 20px 56px;line-height:1.65;font-size:15px;letter-spacing:.01em;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+.page-head{display:flex;align-items:center;gap:14px;margin:2px 0 18px}
+.logo{width:46px;height:46px;flex:0 0 auto;display:block;filter:drop-shadow(0 2px 6px rgba(30,58,138,.25))}
+.logo svg{width:100%;height:100%;display:block}
+h1{font-size:26px;font-weight:700;letter-spacing:-.01em;margin:0 0 4px;line-height:1.25}
+.sub{color:var(--muted);font-size:13px;margin:0;line-height:1.5;font-variant-numeric:tabular-nums}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px;margin:16px 0;box-shadow:0 1px 2px rgba(16,24,40,.04)}
-table{border-collapse:collapse;width:100%;font-size:14px}
+table{border-collapse:collapse;width:100%;font-size:14px;font-variant-numeric:tabular-nums}
 th,td{border-bottom:1px solid var(--line);padding:12px;text-align:left;vertical-align:middle}
-th{background:#f8fafc;font-weight:600;color:#374151;white-space:nowrap;font-size:13px}
+th{background:#f8fafc;font-weight:600;color:#4b5563;white-space:nowrap;font-size:12.5px;letter-spacing:.04em}
 tbody tr:hover{background:#f9fafb}
+tbody td:nth-child(2),tbody td:nth-child(3){font-family:var(--mono);font-size:13.5px}
 tbody tr:last-child td{border-bottom:none}
 tbody td:nth-child(5){white-space:nowrap}
-code{background:#eef2f7;padding:2px 6px;border-radius:5px;font-size:13px}
+code{background:#eef2f7;padding:2px 6px;border-radius:5px;font-size:12.5px;font-family:var(--mono)}
 .bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
-button{cursor:pointer;padding:8px 16px;border:1px solid #d7dce5;border-radius:8px;background:#fff;color:#1f2937;font-size:14px;font-family:inherit;transition:background .15s,border-color .15s,box-shadow .15s}
+button{cursor:pointer;padding:8px 16px;border:1px solid #d7dce5;border-radius:8px;background:#fff;color:#1f2937;font-size:13.5px;font-weight:500;font-family:inherit;line-height:1.4;transition:background .15s,border-color .15s,box-shadow .15s}
 button:hover{background:#f3f4f6;border-color:#c3c9d4}
 button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid rgba(37,99,235,.35);outline-offset:1px}
 button:disabled{opacity:.45;cursor:not-allowed}
@@ -1099,16 +1282,18 @@ button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
 button.primary:hover{background:var(--accent-dark);border-color:var(--accent-dark)}
 button.danger{background:#fff;color:var(--danger);border-color:#f0b4b4}
 button.danger:hover{background:#fef2f2;border-color:var(--danger)}
-input[type=text],input[type=number],select{padding:8px 11px;border:1px solid #d7dce5;border-radius:8px;font-size:13px;font-family:inherit;background:#fff;color:var(--text)}
-#sub{flex:1 1 320px;min-width:200px;font-family:ui-monospace,Consolas,monospace}
+input[type=text],input[type=number],select{padding:8px 11px;border:1px solid #d7dce5;border-radius:8px;font-size:13.5px;font-family:inherit;background:#fff;color:var(--text)}
+#sub{flex:1 1 320px;min-width:200px;font-family:var(--mono)}
 #msg{font-size:14px;color:var(--muted);min-width:180px}
 #search{flex:1 1 240px;min-width:180px}
 #statusFilter{background:#fff}
 details{margin:16px 0 0}
 summary{cursor:pointer;font-weight:600;padding:6px 0;color:#111827;font-size:15px}
 summary::marker{color:var(--accent)}
+.summary-meta{font-weight:400;font-size:13px;color:var(--muted);margin-left:6px;font-variant-numeric:tabular-nums}
+#domainListDetails>summary{margin-bottom:10px}
 .hint{color:var(--muted);font-size:13px;margin:8px 0}
-#cfg{width:100%;min-height:260px;font-family:ui-monospace,Consolas,monospace;font-size:13px;line-height:1.55;padding:12px;border:1px solid #d7dce5;border-radius:8px;resize:vertical;background:#fbfcfe}
+#cfg{width:100%;min-height:260px;font-family:var(--mono);font-size:12.5px;line-height:1.6;padding:12px;border:1px solid #d7dce5;border-radius:8px;resize:vertical;background:#fbfcfe}
 #cfgMsg{font-size:14px;color:var(--muted)}
 .status-dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:8px;vertical-align:middle}
 .status-ok{background:var(--ok);box-shadow:0 0 6px rgba(22,163,74,.5)}
@@ -1139,7 +1324,7 @@ summary::marker{color:var(--accent)}
 .dropdown-item:hover{background:#f5f8ff}
 .dropdown-item.disabled{opacity:.55;cursor:not-allowed;background:#fafafa}
 .dropdown-item input{margin:0;accent-color:var(--accent);flex:0 0 auto}
-.dropdown-item .domain{font-family:ui-monospace,Consolas,monospace;color:#111827;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.dropdown-item .domain{font-family:var(--mono);color:#111827;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
 .dropdown-item .meta{color:var(--muted);font-size:12px;white-space:nowrap}
 .dropdown-empty{padding:18px 12px;text-align:center;color:var(--muted);font-size:13px}
 .cfg-tabs{display:inline-flex;gap:4px;padding:3px;background:#eef2f7;border-radius:9px;margin:10px 0 14px}
@@ -1167,7 +1352,7 @@ summary::marker{color:var(--accent)}
 .domain-editor{display:flex;flex-direction:column;gap:8px}
 .domain-item{border:1px solid var(--line);border-radius:9px;background:#fff;overflow:hidden}
 .domain-main{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:9px 11px}
-.domain-main .d-name{flex:1 1 240px;min-width:160px;font-family:ui-monospace,Consolas,monospace}
+.domain-main .d-name{flex:1 1 240px;min-width:160px;font-family:var(--mono)}
 .domain-main label{display:flex;align-items:center;gap:6px;font-size:13px;color:#4b5563;white-space:nowrap;cursor:pointer}
 .domain-main input[type=checkbox]{width:15px;height:15px;accent-color:var(--accent);margin:0}
 .domain-adv{display:none;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;padding:10px 11px;border-top:1px dashed var(--line);background:#fafbfe}
@@ -1180,23 +1365,28 @@ summary::marker{color:var(--accent)}
 #selCount{font-size:13px;color:var(--muted)}
 .select-cell{width:42px}
 .select-cell input{width:15px;height:15px;accent-color:var(--accent);cursor:pointer;margin:0}
-.modal-overlay{display:none;position:fixed;inset:0;background:rgba(17,24,39,.45);z-index:100;align-items:center;justify-content:center;padding:16px}
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(17,24,39,.55);z-index:100;align-items:center;justify-content:center;padding:20px}
 .modal-overlay.show{display:flex}
-.modal{background:#fff;border-radius:12px;padding:24px;width:90%;max-width:560px;max-height:82vh;overflow:auto;box-shadow:0 20px 50px rgba(16,24,40,.25)}
-.modal h3{margin:0 0 16px;font-size:16px}
-.modal .progress{margin:12px 0;height:6px;background:#eef1f6;border-radius:3px;overflow:hidden}
-.modal .progress-bar{height:100%;width:0%;background:var(--accent);transition:width .3s}
-.modal .result-list{max-height:320px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:8px;margin-top:12px}
-.modal .result-item{display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:6px;font-size:13px}
-.modal .result-item:hover{background:#f6f8fb}
-.modal .result-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.modal{display:flex;flex-direction:column;background:var(--card,#fff);border:1px solid var(--line);border-radius:12px;padding:20px 22px;width:min(94vw,760px);max-height:84vh;overflow:hidden;box-shadow:0 24px 60px rgba(16,24,40,.35)}
+.modal h3{margin:0 0 12px;font-size:16px;line-height:1.5;word-break:break-all;flex:0 0 auto}
+.modal .progress{margin:0 0 10px;height:6px;flex:0 0 auto;background:#eef1f6;border-radius:3px;overflow:hidden}
+.modal .progress-bar{height:100%;width:0%;background:var(--accent);transition:width .3s,background .3s}
+.modal .modal-hint{margin:0 0 10px;font-size:13px;color:var(--muted);line-height:1.5;flex:0 0 auto;word-break:break-word}
+.modal .result-list{flex:1 1 auto;min-height:140px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:6px;background:var(--surface-2)}
+.modal .result-item{display:flex;align-items:flex-start;gap:10px;padding:9px 10px;border-radius:8px;font-size:13px}
+.modal .result-item + .result-item{border-top:1px solid var(--line)}
+.modal .result-item:hover{background:rgba(37,99,235,.06)}
+.modal .result-dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;margin-top:6px}
 .modal .result-ok .result-dot{background:var(--ok)}
 .modal .result-fail .result-dot{background:#ef4444}
-.modal .result-info{flex:1;min-width:0}
-.modal .result-domain{font-family:ui-monospace,Consolas,monospace;color:#111827}
+.modal .result-main{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:4px}
+.modal .result-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+.modal .result-domain{font-family:var(--mono);color:var(--text);word-break:break-all;line-height:1.4}
 .modal .result-source{font-size:11px;padding:1px 6px;border-radius:8px}
-.modal .result-ips{color:var(--muted);font-size:12px;font-family:ui-monospace,Consolas,monospace}
-.modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:16px;padding-top:16px;border-top:1px solid var(--line)}
+.modal .result-ips{color:var(--muted);font-size:12px;font-family:var(--mono);line-height:1.5;word-break:break-all;white-space:normal}
+.modal .result-info{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:3px}
+.modal .modal-empty{display:flex;flex-direction:column;align-items:center;gap:10px;padding:28px 16px;color:var(--muted);font-size:13px;text-align:center}
+.modal-actions{display:flex;flex-wrap:wrap;gap:10px;justify-content:flex-end;margin-top:14px;padding-top:14px;border-top:1px solid var(--line);flex:0 0 auto}
 .table-row-hidden{display:none}
 .group-row td{background:#f7f9fc;padding:0}
 .group-row.open td{background:#eff4fb}
@@ -1204,7 +1394,7 @@ summary::marker{color:var(--accent)}
 .group-toggle{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid transparent;border-radius:8px;background:transparent;font-size:14px;font-weight:600;color:#111827}
 .group-toggle:hover{background:#e8eef8;border-color:#d5deec}
 .group-toggle .caret{width:14px;color:var(--accent);font-size:11px;text-align:center}
-.group-name{font-family:ui-monospace,Consolas,monospace}
+.group-name{font-family:var(--mono)}
 .group-count{font-weight:400;color:var(--muted);font-size:13px}
 .group-ok{font-weight:400;color:var(--ok);font-size:13px}
 .group-ok.has-bad{color:#b45309}
@@ -1268,10 +1458,21 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 .log-tools label{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);cursor:pointer;white-space:nowrap}
 .log-tools input[type=checkbox]{width:15px;height:15px;accent-color:var(--accent);margin:0}
 #logFilter{flex:1 1 240px;min-width:160px}
-#logView{height:340px;overflow:auto;margin:0;padding:12px;background:var(--card);border:1px solid var(--line);border-radius:8px;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;line-height:1.55;white-space:pre-wrap;word-break:break-all;color:var(--text)}
+#logView{height:340px;overflow:auto;margin:0;padding:12px;background:var(--card);border:1px solid var(--line);border-radius:8px;font-family:var(--mono);font-size:12.5px;line-height:1.55;white-space:pre-wrap;word-break:break-all;color:var(--text)}
 #logView .log-line{display:block}
 #logView .log-time{color:var(--muted);margin-right:8px}
 #logState{font-size:13px;color:var(--muted)}
+.mono{font-family:var(--mono)}
+.about-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px 24px;margin:6px 0 14px}
+.about-item{display:flex;gap:10px;align-items:baseline;font-size:13.5px;min-width:0}
+.about-label{color:var(--muted);flex:0 0 auto;font-size:12.5px}
+.about-value{color:var(--text);min-width:0;word-break:break-all;font-size:13px}
+a.about-value{color:var(--accent);text-decoration:none}
+a.about-value:hover{text-decoration:underline}
+.about-block h4{margin:0 0 6px;font-size:13px;color:var(--text);font-weight:600}
+.about-steps{margin:0;padding-left:20px;color:var(--muted);font-size:13px;line-height:1.85}
+.about-steps code{font-size:12px}
+.about-foot{margin-top:12px;color:var(--muted);font-size:12.5px;line-height:1.6}
 .history-tools{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:10px 0}
 #historyDomain{min-width:180px}
 #historyRange{min-width:130px}
@@ -1293,8 +1494,27 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 (function(){try{var m=localStorage.getItem("ho-theme")||"system";var d=m==="dark"||(m==="system"&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.setAttribute("data-theme",d?"dark":"light");}catch(e){}})();
 </script>
 </head><body>
-<h1>hosts-optimizer</h1>
-<p class="sub">生成于 {{.GeneratedAt}} · 每 {{.ScheduleMinutes}} 分钟轮询 · 有效 {{.ActiveCount}}/{{.DomainCount}} 个域名</p>
+<header class="page-head">
+  <span class="logo" aria-hidden="true">
+    <svg viewBox="0 0 48 48">
+      <defs>
+        <linearGradient id="hoLogoBg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#1e3a8a"/>
+          <stop offset="1" stop-color="#4f46e5"/>
+        </linearGradient>
+      </defs>
+      <rect width="48" height="48" rx="11" fill="url(#hoLogoBg)"/>
+      <circle cx="24" cy="24" r="13" fill="none" stroke="#fff" stroke-width="2"/>
+      <ellipse cx="24" cy="24" rx="6" ry="13" fill="none" stroke="#fff" stroke-width="1.5"/>
+      <line x1="11" y1="24" x2="37" y2="24" stroke="#fff" stroke-width="1.5"/>
+      <path d="M27 14 L20 26 h5 l-3 8 9-13 h-5 z" fill="#22c55e" stroke="#fff" stroke-width="1.2" stroke-linejoin="round"/>
+    </svg>
+  </span>
+  <div>
+    <h1>Hosts 优选订阅</h1>
+    <p class="sub">生成于 {{.GeneratedAt}} · 每 {{.ScheduleMinutes}} 分钟轮询 · 有效 {{.ActiveCount}}/{{.DomainCount}} 个域名</p>
+  </div>
+</header>
 
 <div class="card">
 <div class="bar">
@@ -1306,6 +1526,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
   <option value="ok">正常</option>
   <option value="fail">失败</option>
   <option value="pending">待探测</option>
+  <option value="disabled">已禁用</option>
 </select>
 <select id="themeSel" title="主题">
   <option value="system">跟随系统</option>
@@ -1424,6 +1645,8 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 </div>
 
 <div class="card">
+<details id="domainListDetails">
+<summary>域名列表 <span class="summary-meta">有效 {{.ActiveCount}}/{{.DomainCount}}</span></summary>
 <div class="table-tools">
   <div class="left">
     <span id="selCount">已选 0 个域名</span>
@@ -1446,13 +1669,16 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 </tr>
 </thead><tbody>
 {{range $i, $d := .Domains}}
-<tr data-name="{{$d.Name}}" data-ip="{{$d.IP}}" data-reason="{{$d.Reason}}" data-status="{{$d.Validated}}" data-pending="{{and (eq $d.IP "") (eq $d.Reason "待探测")}}">
+<tr data-name="{{$d.Name}}" data-ip="{{$d.IP}}" data-reason="{{$d.Reason}}" data-status="{{$d.Validated}}" data-pending="{{$d.Pending}}" data-disabled="{{$d.Disabled}}">
   <td class="select-cell"><input type="checkbox" class="row-check" value="{{$d.Name}}"></td>
   <td class="truncate" title="{{$d.Name}}">{{$d.Name}}</td>
   <td class="truncate" title="{{$d.IP}}">{{$d.IP}}</td>
   <td>{{if $d.IP}}<button type="button" class="latency-btn" data-domain="{{$d.Name}}" title="查看全部候选 IP">{{$d.LatencyMS}} ms</button>{{else}}—{{end}}</td>
   <td>
-    {{if and (eq $d.IP "") (eq $d.Reason "待探测")}}
+    {{if $d.Disabled}}
+    <span class="status-dot status-unknown"></span>
+    已禁用
+    {{else if $d.Pending}}
     <span class="status-dot status-unknown"></span>
     待探测
     {{else}}
@@ -1464,12 +1690,14 @@ tr.domain-row td:nth-child(2){padding-left:32px}
   <td>
     <button type="button" class="expand-btn" data-domain="{{$d.Name}}">展开域名</button>
     <button type="button" class="refresh-btn" data-domain="{{$d.Name}}" title="单独刷新该域名">刷新</button>
+    <button type="button" class="disable-btn" data-domain="{{$d.Name}}" data-disabled="{{$d.Disabled}}">{{if $d.Disabled}}启用{{else}}禁用{{end}}</button>
     <span class="badge">{{$d.Reason}}</span>
   </td>
 </tr>
 {{end}}
 </tbody></table>
 
+</details>
 </div>
 
 <div class="card">
@@ -1509,11 +1737,32 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 </details>
 </div>
 
+<div class="card">
+<details id="aboutDetails">
+<summary>关于</summary>
+<div class="about-grid">
+  <div class="about-item"><span class="about-label">版本</span><span class="about-value mono">v{{.Version}}</span></div>
+  <div class="about-item"><span class="about-label">项目地址</span><a class="about-value" href="{{.ProjectURL}}" target="_blank" rel="noopener">{{.ProjectURL}}</a></div>
+</div>
+<div class="about-block">
+  <h4>使用说明</h4>
+  <ol class="about-steps">
+    <li>在「编辑域名清单」中添加域名，或输入主域名后勾选相关子域名批量添加，最后点「保存并生效」。</li>
+    <li>在 AdGuard Home 打开「过滤器 → DNS 重写清单」，添加订阅地址 <code>http://&lt;NAS内网IP&gt;:18088/agh.txt</code>，更新间隔设为 1 小时。</li>
+    <li>需要立即更新时，展开域名分组后勾选并点「刷新选中」；只想重写订阅文件时点「刷新 AGH 规则」。</li>
+    <li>点击延迟数值可查看全部候选 IP 并手动切换；状态表支持按主域名分组以及启用/禁用域名。</li>
+    <li>其他端点：<code>/hosts.txt</code>（hosts 语法）、<code>/status.json</code>（运行状态与统计）。</li>
+  </ol>
+</div>
+<div class="about-foot">管理接口无登录鉴权，请仅在内网使用；刷新任务状态保存在进程内存，重启后重新触发即可。</div>
+</details>
+</div>
+
 <div class="modal-overlay" id="expandModal">
   <div class="modal">
-    <h3>展开域名: <span id="modalDomain" style="font-family:monospace;color:var(--accent)"></span></h3>
+    <h3>展开域名: <span id="modalDomain" style="font-family:var(--mono);color:var(--accent)"></span></h3>
     <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
-    <p id="progressText" style="font-size:13px;color:var(--muted);margin:8px 0">准备中...</p>
+    <p id="progressText" class="modal-hint">准备中...</p>
     <div class="result-list" id="resultList"></div>
     <div class="modal-actions">
       <button type="button" id="modalClose">关闭</button>
@@ -1524,7 +1773,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 
 <div class="modal-overlay" id="ipModal">
   <div class="modal">
-    <h3>候选 IP 延时: <span id="ipDomain" style="font-family:ui-monospace,Consolas,monospace;color:var(--accent)"></span></h3>
+    <h3>候选 IP 延时: <span id="ipDomain" style="font-family:var(--mono);color:var(--accent)"></span></h3>
     <p class="hint" id="ipHint"></p>
     <div class="result-list" id="ipList"></div>
     <div class="modal-actions">
@@ -1688,6 +1937,14 @@ tr.domain-row td:nth-child(2){padding-left:32px}
     expandLabel.appendChild(expand);
     expandLabel.appendChild(document.createTextNode(" 展开子域名"));
 
+    var disabledLabel = document.createElement("label");
+    var disabled = document.createElement("input");
+    disabled.type = "checkbox";
+    disabled.className = "d-disabled";
+    disabled.checked = !!d.disabled;
+    disabledLabel.appendChild(disabled);
+    disabledLabel.appendChild(document.createTextNode(" 禁用"));
+
     var advBtn = document.createElement("button");
     advBtn.type = "button";
     advBtn.textContent = "高级";
@@ -1701,6 +1958,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 
     main.appendChild(name);
     main.appendChild(expandLabel);
+    main.appendChild(disabledLabel);
     main.appendChild(advBtn);
     main.appendChild(delBtn);
 
@@ -1797,6 +2055,11 @@ tr.domain-row td:nth-child(2){padding-left:32px}
       if (!name) return;
       base.name = name;
       base.expand = item.querySelector(".d-expand").checked;
+      if (item.querySelector(".d-disabled").checked) {
+        base.disabled = true;
+      } else {
+        delete base.disabled;
+      }
       var sni = item.querySelector(".d-sni").value.trim();
       if (sni) base.sni = sni; else delete base.sni;
       var port = item.querySelector(".d-port").value.trim();
@@ -2146,8 +2409,16 @@ tr.domain-row td:nth-child(2){padding-left:32px}
       selectLabel.appendChild(groupCheck);
       selectLabel.appendChild(document.createTextNode(" 全选本组"));
 
+      var disableLabel = document.createElement("label");
+      disableLabel.className = "group-select";
+      var groupDisable = document.createElement("input");
+      groupDisable.type = "checkbox";
+      disableLabel.appendChild(groupDisable);
+      disableLabel.appendChild(document.createTextNode(" 禁用本组"));
+
       wrap.appendChild(toggle);
       wrap.appendChild(selectLabel);
+      wrap.appendChild(disableLabel);
       cell.appendChild(wrap);
       head.appendChild(cell);
       tbody.appendChild(head);
@@ -2161,6 +2432,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
       g.count = count;
       g.ok = ok;
       g.check = groupCheck;
+      g.disableCheck = groupDisable;
 
       toggle.onclick = function () {
         g.open = !g.open;
@@ -2174,6 +2446,21 @@ tr.domain-row td:nth-child(2){padding-left:32px}
           if (c) c.checked = groupCheck.checked;
         });
         updateSelection();
+      };
+      groupDisable.onchange = function () {
+        var names = g.rows.map(function (tr) { return tr.dataset.name; });
+        if (names.length === 0) return;
+        var wantDisabled = groupDisable.checked;
+        groupDisable.disabled = true;
+        applyDisable(names, wantDisabled, function (ok) {
+          groupDisable.disabled = false;
+          if (ok) {
+            msg.textContent = (wantDisabled ? "已禁用 " : "已启用 ") + names.length + " 个域名";
+            setTimeout(function () { location.reload(); }, 600);
+          } else {
+            groupDisable.checked = !wantDisabled;
+          }
+        });
       };
     });
   }
@@ -2189,9 +2476,12 @@ tr.domain-row td:nth-child(2){padding-left:32px}
         var reason = (tr.dataset.reason || "").toLowerCase();
         var validated = tr.dataset.status === "true";
         var pending = tr.dataset.pending === "true";
+        var disabled = tr.dataset.disabled === "true";
         var match = !kw || name.indexOf(kw) >= 0 || ip.indexOf(kw) >= 0 || reason.indexOf(kw) >= 0;
         var statusMatch = st === "all" || (st === "ok" && validated) ||
-          (st === "fail" && !validated && !pending) || (st === "pending" && pending);
+          (st === "fail" && !validated && !pending && !disabled) ||
+          (st === "pending" && pending && !disabled) ||
+          (st === "disabled" && disabled);
         return match && statusMatch;
       });
       g.visible = visible;
@@ -2209,12 +2499,56 @@ tr.domain-row td:nth-child(2){padding-left:32px}
       g.count.textContent = visible.length + " 个域名";
       g.ok.textContent = okCount + " 正常";
       g.ok.className = "group-ok" + (visible.length - okCount > 0 ? " has-bad" : "");
+      if (g.disableCheck) {
+        var allDisabled = visible.length > 0 && visible.every(function (tr) {
+          return tr.dataset.disabled === "true";
+        });
+        g.disableCheck.checked = allDisabled;
+        g.disableCheck.indeterminate = !allDisabled && visible.some(function (tr) {
+          return tr.dataset.disabled === "true";
+        });
+      }
     });
     updateSelection();
   }
 
   searchInput.addEventListener("input", applyFilter);
   statusFilter.addEventListener("change", applyFilter);
+
+  // 启用/禁用域名（立即写回配置并从产物移除）
+  function applyDisable(names, disabled, done) {
+    fetch("/api/disable", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ names: names, disabled: disabled })
+    }).then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
+      .then(function (x) {
+        if (!x.body.ok) {
+          msg.textContent = "操作失败: " + (x.body.error || ("HTTP " + x.status));
+          if (done) done(false);
+          return;
+        }
+        if (done) done(true);
+      })
+      .catch(function (e) {
+        msg.textContent = "请求失败: " + e;
+        if (done) done(false);
+      });
+  }
+  document.querySelectorAll(".disable-btn").forEach(function (btn) {
+    btn.onclick = function () {
+      var name = btn.dataset.domain;
+      var wantDisabled = btn.dataset.disabled !== "true";
+      btn.disabled = true;
+      applyDisable([name], wantDisabled, function (ok) {
+        btn.disabled = false;
+        if (ok) {
+          msg.textContent = (wantDisabled ? "已禁用 " : "已启用 ") + name;
+          setTimeout(function () { location.reload(); }, 600);
+        }
+      });
+    };
+  });
 
   // 表格勾选与批量删除
   var selectAll = document.getElementById("selectAll");
@@ -2355,6 +2689,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
       currentExpandDomain = domain;
       modalDomain.textContent = domain;
       progressBar.style.width = "0%";
+      progressBar.style.background = "";
       progressText.textContent = "正在查询子域名...";
       resultList.innerHTML = "";
       modalAddAll.disabled = true;
@@ -2364,6 +2699,8 @@ tr.domain-row td:nth-child(2){padding-left:32px}
   });
 
   function doExpand(domain) {
+    progressBar.style.width = "0%";
+    progressBar.style.background = "";
     fetch("/api/expand", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2374,6 +2711,7 @@ tr.domain-row td:nth-child(2){padding-left:32px}
           progressText.textContent = "失败: " + (j.error || "未知错误");
           progressBar.style.width = "100%";
           progressBar.style.background = "#f44336";
+          renderEmpty("查询失败，请稍后重试", true);
           return;
         }
         expandResults = j.results || [];
@@ -2383,25 +2721,64 @@ tr.domain-row td:nth-child(2){padding-left:32px}
         modalAddAll.disabled = expandResults.length === 0;
       })
       .catch(function(e) {
-        progressText.textContent = "请求失败: " + e;
+        progressText.textContent = "请求失败: " + e.message;
         progressBar.style.width = "100%";
         progressBar.style.background = "#f44336";
+        renderEmpty("网络请求失败，请检查连接后重试", true);
       });
+  }
+
+  function renderEmpty(text, retry) {
+    resultList.innerHTML = "";
+    var box = document.createElement("div");
+    box.className = "modal-empty";
+    var tip = document.createElement("div");
+    tip.textContent = text;
+    box.appendChild(tip);
+    if (retry) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = "重试";
+      btn.onclick = function () {
+        progressText.textContent = "正在重新查询子域名...";
+        resultList.innerHTML = "";
+        doExpand(modalDomain.textContent);
+      };
+      box.appendChild(btn);
+    }
+    resultList.appendChild(box);
   }
 
   function renderResults() {
     resultList.innerHTML = "";
+    if (expandResults.length === 0) {
+      renderEmpty("未发现相关子域名，可稍后重试或更换主域名", false);
+      return;
+    }
     expandResults.forEach(function(r) {
       var item = document.createElement("div");
       item.className = "result-item " + (r.resolved ? "result-ok" : "result-fail");
-      var ips = r.ips && r.ips.length ? r.ips.join(", ") : "\u2014";
-      item.innerHTML =
-        "<span class=\"result-dot\"></span>" +
-        "<div class=\"result-info\">" +
-        "  <div class=\"result-domain\">" + r.domain + "</div>" +
-        "  <span class=\"result-source " + sourceClass(r.source) + "\">" + sourceLabel(r.source) + "</span>" +
-        "</div>" +
-        "<span class=\"result-ips\">" + ips + "</span>";
+      var dot = document.createElement("span");
+      dot.className = "result-dot";
+      var main = document.createElement("div");
+      main.className = "result-main";
+      var line = document.createElement("div");
+      line.className = "result-line";
+      var domain = document.createElement("span");
+      domain.className = "result-domain";
+      domain.textContent = r.domain;
+      var source = document.createElement("span");
+      source.className = "result-source " + sourceClass(r.source);
+      source.textContent = sourceLabel(r.source);
+      line.appendChild(domain);
+      line.appendChild(source);
+      var ips = document.createElement("div");
+      ips.className = "result-ips";
+      ips.textContent = (r.ips && r.ips.length) ? r.ips.join("  ") : "不可解析";
+      main.appendChild(line);
+      main.appendChild(ips);
+      item.appendChild(dot);
+      item.appendChild(main);
       resultList.appendChild(item);
     });
   }
@@ -2776,13 +3153,12 @@ func (a *App) index(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "服务正在初始化，请稍后重试", http.StatusServiceUnavailable)
 		return
 	}
-	domains := append([]output.StatusDomain(nil), snap.Status.Domains...)
-	if rt, err := config.Load(); err == nil {
-		names := make([]string, 0, len(rt.Config.Domains))
-		for _, d := range rt.Config.Domains {
-			names = append(names, d.Name)
+	views := buildDomainViews(snap.Status.Domains)
+	active := 0
+	for _, v := range views {
+		if v.Validated > 0 && !v.Disabled {
+			active++
 		}
-		domains = withPendingDomains(domains, names)
 	}
 	data := struct {
 		GeneratedAt     string
@@ -2790,14 +3166,18 @@ func (a *App) index(w http.ResponseWriter, r *http.Request) {
 		ActiveCount     int
 		DomainCount     int
 		Ready           bool
-		Domains         []output.StatusDomain
+		Domains         []domainView
+		Version         string
+		ProjectURL      string
 	}{
 		GeneratedAt:     snap.Status.GeneratedAt.Format(time.RFC3339),
 		ScheduleMinutes: snap.Status.ScheduleMinutes,
-		ActiveCount:     snap.Status.ActiveCount,
-		DomainCount:     len(domains),
-		Ready:           snap.Ready,
-		Domains:         domains,
+		ActiveCount:     active,
+		DomainCount:     len(views),
+		Ready:           active > 0,
+		Domains:         views,
+		Version:         a.version,
+		ProjectURL:      "https://github.com/wulinwei959/ip-optimizer",
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := indexTmpl.Execute(w, data); err != nil {
@@ -2805,20 +3185,65 @@ func (a *App) index(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// withPendingDomains 把配置里尚未进入快照的域名补成「待探测」行。
-func withPendingDomains(domains []output.StatusDomain, names []string) []output.StatusDomain {
-	out := append([]output.StatusDomain(nil), domains...)
-	seen := make(map[string]bool, len(out)+len(names))
-	for _, d := range out {
+// domainView 是首页表格的一行：快照状态 + 配置里的启用/待探测标记。
+type domainView struct {
+	Name       string
+	IP         string
+	LatencyMS  float64
+	Reason     string
+	Validated  int
+	Candidates int
+	Disabled   bool
+	Pending    bool
+}
+
+// buildDomainViews 合并「配置中的域名」与「本轮快照」，未探测的标记待探测，
+// 配置里禁用的标记已禁用。
+func buildDomainViews(snapDomains []output.StatusDomain) []domainView {
+	var cfgDomains []config.Domain
+	if rt, err := config.Load(); err == nil {
+		cfgDomains = rt.Config.Domains
+	}
+	return mergeDomainViews(snapDomains, cfgDomains)
+}
+
+// mergeDomainViews 是 buildDomainViews 的纯函数版本，便于测试。
+func mergeDomainViews(snapDomains []output.StatusDomain, cfgDomains []config.Domain) []domainView {
+	disabled := make(map[string]bool, len(cfgDomains))
+	names := make([]string, 0, len(cfgDomains))
+	for _, d := range cfgDomains {
+		name := strings.TrimSpace(d.Name)
+		if name == "" {
+			continue
+		}
+		names = append(names, name)
+		if d.Disabled {
+			disabled[name] = true
+		}
+	}
+	out := make([]domainView, 0, len(snapDomains)+len(names))
+	seen := make(map[string]bool, len(snapDomains)+len(names))
+	for _, d := range snapDomains {
 		seen[d.Name] = true
+		v := domainView{
+			Name: d.Name, IP: d.IP, LatencyMS: d.LatencyMS, Reason: d.Reason,
+			Validated: d.Validated, Candidates: d.Candidates, Disabled: disabled[d.Name],
+		}
+		if v.Disabled {
+			v.Reason = "已禁用"
+		}
+		out = append(out, v)
 	}
 	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" || seen[name] {
+		if seen[name] {
 			continue
 		}
 		seen[name] = true
-		out = append(out, output.StatusDomain{Name: name, Reason: "待探测"})
+		v := domainView{Name: name, Disabled: disabled[name], Pending: true, Reason: "待探测"}
+		if v.Disabled {
+			v.Reason = "已禁用"
+		}
+		out = append(out, v)
 	}
 	return out
 }

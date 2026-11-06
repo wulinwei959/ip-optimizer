@@ -1,6 +1,6 @@
 # 技术文档
 
-> 适用版本：1.0.10 · 更新：2026-11-07
+> 适用版本：1.0.14 · 更新：2026-11-07
 >
 > 本文描述内部实现与数据契约；配置字段与部署步骤见 [`deploy/config-schema/README.md`](../deploy/config-schema/README.md) 与 [`deploy/README.md`](../deploy/README.md)。
 
@@ -102,6 +102,12 @@
 
 每行一条 JSON，字段：`time`、`round_id`、`domain`、`group`、`ip`、`latency_ms`、`candidates`、`validated`、`reason`。按月分片、gzip 压缩，默认保留 12 个月（`history_retention_months`）。
 
+### 禁用语义
+
+- `domains[].disabled=true` 的域名不参与任何探测轮次，也不写入 `hosts.txt` / `agh.txt` / `status.json`。
+- 通过 `/api/disable` 禁用时立即从当前快照与产物中移除；启用后标记为「待探测」，下一轮或手动刷新恢复。
+- 保存配置时同样会移除已禁用域名，避免「页面已禁用但订阅仍生效」。
+
 ## 6. HTTP API
 
 | 方法 | 路径 | 说明 |
@@ -116,6 +122,7 @@
 | GET | `/api/history` | 历史查询（domain/group/from/to/limit） |
 | GET | `/api/candidates` | 最近一轮候选 IP 与延迟 |
 | POST | `/api/switch` | 手动切换候选 IP 并立即生效 |
+| POST | `/api/disable` | 启用/禁用域名（按 names 或 group），禁用后立即从产物移除 |
 | GET | `/api/logs` | 增量读取运行日志 |
 
 写接口要求 `Content-Type: application/json`（阻止简单跨站表单），但**没有登录鉴权**，只应部署在内网。
@@ -137,6 +144,9 @@
 - 状态表按可注册主域名分组，支持展开/收起、整组勾选、批量刷新/删除。
 - 表格会合并「配置中的域名」与「本轮状态」：尚未探测的域名以「待探测」行展示，保存后即可看到并直接刷新。
 - 延迟单元格可打开候选 IP 弹窗并手动切换。
+- 展开域名弹窗固定头部与底部操作区，仅结果列表滚动；域名与来源同排、IP 列表另起一行，失败时可直接重试。
+- 页面标题、窗口标题与应用名称统一为「Hosts 优选订阅」；中文字体栈与等宽字体分别由 `--sans` / `--mono` 变量控制。
+- 页面底部「关于」展示编译版本号（由入口传入）、GitHub 项目地址与使用说明；域名列表区块默认折叠。
 - 历史趋势用原生 SVG 绘制平均延迟曲线。
 - 日志面板轮询 `/api/logs`，支持自动刷新、关键字筛选、清空视图。
 - 主题支持浅色/深色/跟随系统，选择存 `localStorage`。

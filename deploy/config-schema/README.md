@@ -25,6 +25,7 @@
 | `suppress_aaaa` | bool | true | 保留字段，仅在 `status.json` 中标记；**不生成任何产物**，见下文 IPv6 说明 |
 | `expand` | bool | false | 是否启用域名展开（从主域名发现相关子域名） |
 | `expand_sources` | string[] | 空（用全局默认） | 展开来源：`ct` (Certificate Transparency)、`wordlist` (常见子域名字典)、`rules` (内置服务规则) |
+| `disabled` | bool | false | 禁用该域名：不参与探测，也不写入 `hosts.txt` / `agh.txt` / `status.json`；随时可改回 false 恢复 |
 
 ### `defaults`
 
@@ -65,6 +66,7 @@
 | `POST /api/refresh-agh` | 只用当前快照重写 `agh.txt`，不触发探测 |
 | `GET /api/candidates?domain=` | 返回该域名最近一轮全部候选 IP 与延迟、当前生效 IP |
 | `POST /api/switch` | 手动切换当前 IP：`{"domain":"a.com","ip":"1.2.3.4"}` |
+| `POST /api/disable` | 启用/禁用域名：`{"names":["a.com"],"disabled":true}` 或 `{"group":"github.com","disabled":true}`；禁用后立即从产物移除 |
 
 文本端点返回 `ETag` / `Last-Modified`，支持 `If-None-Match` -> 304。  
 无有效 IP 时 `hosts.txt` / `agh.txt` 返回 503（防止 AGH 订阅空清单），`status.json` 视为 200 并说明原因；配置校验、原子写保证关键时刻保留上一轮产物，不写坏文件。

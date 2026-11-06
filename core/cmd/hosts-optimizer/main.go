@@ -18,7 +18,7 @@ import (
 	"hosts-optimizer/internal/logbuf"
 )
 
-const version = "1.0.10"
+const version = "1.0.14"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
@@ -56,7 +56,7 @@ func main() {
 		log.Printf("时区 %q 不可用，使用系统本地时区: %v", rt.TZ, err)
 	}
 
-	a, err := app.New(rt)
+	a, err := app.New(rt, version)
 	if err != nil {
 		log.Fatalf("初始化失败: %v", err)
 	}

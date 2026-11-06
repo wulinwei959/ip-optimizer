@@ -14,7 +14,7 @@
 
 仓库：<https://github.com/wulinwei959/ip-optimizer>
 
-当前版本：**1.0.10**（版本历史与验证记录见 [`docs/progress.md`](docs/progress.md)）
+当前版本：**1.0.14**（版本历史与验证记录见 [`docs/progress.md`](docs/progress.md)）
 
 ---
 
@@ -51,6 +51,9 @@ AdGuard Home 订阅
 - **配置热加载**：每轮重新读取 `domains.json`，增删域名下一轮自动生效；也可 `POST /refresh` 立即重跑，无需重启。
 - **重启可恢复**：启动时从磁盘恢复上一轮产物，不必等首轮探测结束就能对外提供订阅。
 - **域名发现**：在「编辑域名清单」输入主域名（如 `github.com`），自动从 CT 日志、字典与规则中发现相关子域名；下拉列表逐项勾选，点「添加」即可写入配置，无需手工抄写。
+- **展开域名弹窗**：域名与来源同排、IP 列表另起一行，长列表独立滚动且不遮挡操作按钮；查询失败时显示原因并可直接重试。
+- **统一命名与排版**：页面标题、窗口标题与应用名称统一为「Hosts 优选订阅」；优化中文字体栈、字号层级、表格等宽数字与图标标识。
+- **关于面板**：页面底部新增「关于」，展示版本号、GitHub 项目地址与使用说明；域名列表整体可折叠，默认收起。
 - **按主域名分组**：状态表按可注册主域名归类（如 `api.gitlab.com` 归入 `gitlab.com`），点分组标题展开该分类的全部域名；支持整组勾选、全部展开/收起，搜索时自动展开命中分组。
 - **图形化配置**：轮询周期、探测 DNS、并发、超时、滞回、子域名展开等参数与域名列表均可在表单内直接填写，保存后自动写回 `domains.json` 并触发新一轮；需要精细控制时可切到 JSON 源码模式。
 - **加密 DNS 上游**：`probe_dns` 支持 UDP、DoT、DoH 混用，例如 `tls://dns.alidns.com`、`https://dns.cloudflare.com/dns-query`；DoQ 需第三方 QUIC 库，未引入。
@@ -60,6 +63,7 @@ AdGuard Home 订阅
 - **批量刷新选中**：展开主域名分组后可勾选单个域名或整组，点「刷新选中」只重跑这些域名，其余结果保持不变。
 - **候选延时与手动切换**：点击表格中的延迟数值可查看本轮全部可连接 IP 的延迟，并手动切换当前生效 IP；切换会立即写入状态与订阅产物。
 - **保存即显示**：新增域名保存后立即出现在分组中，未探测时标记「待探测」，可直接点行内「刷新」探测。
+- **域名禁用**：单个域名可勾选「禁用」，域名组可用「禁用本组」整组切换；禁用域名不参与探测、从 `hosts.txt` / `agh.txt` 中移除，状态表显示「已禁用」，可随时启用。
 - **AGH 规则刷新**：「刷新 AGH 规则」按钮只根据当前快照重新生成 `agh.txt`，不重新探测 DNS/TCP；手动刷新选中域名或切换 IP 后也会自动同步订阅文件。
 - **异步刷新**：`POST /refresh` 立即返回 `task_id` 并在后台执行，页面轮询 `/api/refresh-status` 显示进度，长时间探测不再阻塞请求。
 - **fnOS 桌面入口**：桌面图标以 iframe 窗口打开状态页，可查看生效 IP / 延迟、复制订阅地址、刷新选中域名或单独重写 AGH 规则；表格支持勾选与批量操作。
@@ -201,6 +205,7 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 | `GET /api/candidates?domain=<域名>` | 返回该域名最近一轮全部可连接 IP 与延迟、当前生效 IP |
 | `POST /api/switch` | 手动切换：JSON 体 `{"domain":"a.com","ip":"1.2.3.4"}`，IP 必须在该域名最近候选列表中 |
 | `POST /api/refresh-agh` | 只用当前快照重写 `agh.txt`，返回字节数，不触发探测 |
+| `POST /api/disable` | 启用/禁用域名：`{"names":["a.com"],"disabled":true}` 或 `{"group":"github.com","disabled":true}`；禁用后立即从产物移除 |
 | `GET /api/domains` | 读取 `domains.json` 原文 |
 | `PUT /api/domains` | 校验并原子写回 `domains.json`（要求 `Content-Type: application/json`） |
 | `POST /api/expand` | 按需发现主域名的相关子域名，返回解析结果（不修改配置） |
