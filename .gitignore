@@ -5,6 +5,17 @@ deploy/dist/
 /hosts-optimizer.exe
 *.exe
 
+# CI 调试临时文件与本地脚本工具
+*.bak
+_ci_min.yml
+_rewrite_ci.py
+write_ci.py
+fix_ci.py
+ci_backup.yml
+full_check.yml
+pr_body.md
+tmp_fpk/
+
 # 本地运行态：配置覆盖、生成的订阅文件、状态文件
 core/run/
 
