@@ -39,6 +39,27 @@ type App struct {
 	snap         *output.Snapshot
 	roundMu      sync.Mutex
 	lastSchedule int
+
+	// 异步刷新任务
+	refreshMu   sync.Mutex
+	refreshTask *refreshTask
+}
+
+// 刷新任务状态取值。
+const (
+	refreshRunning = "running"
+	refreshDone    = "done"
+	refreshFailed  = "error"
+)
+
+// refreshTask 保存一次后台刷新任务的状态，供前端轮询进度。
+type refreshTask struct {
+	ID               string     `json:"id"`
+	State            string     `json:"state"`
+	StartedAt        time.Time  `json:"started_at"`
+	FinishedAt       *time.Time `json:"finished_at,omitempty"`
+	NextRoundMinutes int        `json:"next_round_minutes,omitempty"`
+	Error            string     `json:"error,omitempty"`
 }
 
 // New 初始化目录、CA 池、状态，并尝试从磁盘恢复上一轮产物。
@@ -129,6 +150,7 @@ func (a *App) recoverSnapshot() {
 func (a *App) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", a.handle)
+	mux.HandleFunc("/api/refresh-status", a.handleRefreshStatus)
 	srv := &http.Server{
 		Addr: ":" + a.port, Handler: mux,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -339,17 +361,78 @@ func (a *App) serve(w http.ResponseWriter, r *http.Request, kind string) {
 func (a *App) refresh(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
-		http.Error(w, "仅支持 POST", http.StatusMethodNotAllowed)
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "仅支持 POST"})
 		return
 	}
-	minutes, err := a.doRound(r.Context())
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	taskID, reused := a.startRefresh()
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"ok": true, "task_id": taskID, "reused": reused,
+	})
+}
+
+// startRefresh 在后台启动一轮探测；已有任务在跑时直接复用，避免重复排队。
+func (a *App) startRefresh() (string, bool) {
+	a.refreshMu.Lock()
+	defer a.refreshMu.Unlock()
+	if a.refreshTask != nil && a.refreshTask.State == refreshRunning {
+		return a.refreshTask.ID, true
+	}
+	task := &refreshTask{
+		ID:        fmt.Sprintf("r%d", time.Now().UnixNano()),
+		State:     refreshRunning,
+		StartedAt: time.Now(),
+	}
+	a.refreshTask = task
+	go a.runRefresh(task)
+	return task.ID, false
+}
+
+// runRefresh 执行后台轮次并回填任务状态。
+// 使用独立 context：请求结束后探测不应被取消，各阶段仍有自身的超时控制。
+func (a *App) runRefresh(task *refreshTask) {
+	minutes, err := a.doRound(context.Background())
+	finished := time.Now()
+	a.refreshMu.Lock()
+	defer a.refreshMu.Unlock()
+	task.FinishedAt = &finished
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+		task.State = refreshFailed
+		task.Error = err.Error()
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "next_round_minutes": minutes})
+	task.State = refreshDone
+	task.NextRoundMinutes = minutes
+}
+
+// handleRefreshStatus 查询最近一次刷新任务的状态。
+// 不传 task_id 时返回最近任务；尚无任务时返回 idle。
+func (a *App) handleRefreshStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "仅支持 GET"})
+		return
+	}
+	id := r.URL.Query().Get("task_id")
+	a.refreshMu.Lock()
+	task := a.refreshTask
+	var snap refreshTask
+	if task != nil {
+		snap = *task
+	}
+	a.refreshMu.Unlock()
+	if task == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "state": "idle"})
+		return
+	}
+	if id != "" && id != snap.ID {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "未找到该刷新任务"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "id": snap.ID, "state": snap.State,
+		"started_at": snap.StartedAt, "finished_at": snap.FinishedAt,
+		"next_round_minutes": snap.NextRoundMinutes, "error": snap.Error,
+	})
 }
 
 // handleDomainsConfig 在线读取 / 保存 domains.json。
@@ -530,69 +613,108 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 var indexTmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>hosts-optimizer</title>
 <style>
-body{font-family:system-ui,sans-serif;max-width:1100px;margin:24px auto;padding:0 16px;line-height:1.6}
+:root{--bg:#f4f6f9;--card:#fff;--line:#e5e8ee;--text:#1f2937;--muted:#6b7280;--accent:#2563eb;--accent-dark:#1d4ed8;--danger:#dc2626;--ok:#16a34a;--radius:12px}
+*{box-sizing:border-box}
+body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;background:var(--bg);color:var(--text);max-width:1180px;margin:0 auto;padding:30px 20px 56px;line-height:1.65}
+h1{font-size:30px;letter-spacing:-.02em;margin:0 0 8px}
+.sub{color:var(--muted);font-size:14px;margin:0 0 2px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px;margin:16px 0;box-shadow:0 1px 2px rgba(16,24,40,.04)}
 table{border-collapse:collapse;width:100%;font-size:14px}
-th,td{border-bottom:1px solid #eee;padding:10px 12px;text-align:left;vertical-align:middle}
-th{background:#fafafa;font-weight:600;color:#333;white-space:nowrap}
-code{background:#f2f2f2;padding:2px 5px;border-radius:4px;font-size:13px}
-.bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:16px 0}
-button{cursor:pointer;padding:7px 16px;border:1px solid #ddd;border-radius:6px;background:#fff;font-size:14px;transition:all .15s}
-button:hover{background:#f5f5f5;border-color:#ccc}
-button:disabled{opacity:.5;cursor:not-allowed}
-button.primary{background:#1976d2;color:#fff;border-color:#1976d2}
-button.primary:hover{background:#1565c0;border-color:#1565c0}
-button.danger{background:#fff;color:#d32f2f;border-color:#d32f2f}
-button.danger:hover{background:#fef2f2;border-color:#d32f2f}
-#sub{flex:1 1 320px;min-width:200px;padding:7px 10px;border:1px solid #ccc;border-radius:6px;font-family:monospace;font-size:13px}
-#msg{font-size:14px;color:#555;min-width:180px}
-#search{flex:1 1 240px;min-width:180px;padding:7px 10px;border:1px solid #ccc;border-radius:6px;font-size:13px}
-#statusFilter{padding:7px 10px;border:1px solid #ccc;border-radius:6px;font-size:13px;background:#fff}
-details{margin:18px 0;border-top:1px solid #eee;padding-top:12px}
-summary{cursor:pointer;font-weight:600;padding:6px 0;color:#333}
-.hint{color:#666;font-size:13px;margin:8px 0}
-#cfg{width:100%;min-height:260px;box-sizing:border-box;font-family:ui-monospace,Consolas,monospace;font-size:13px;line-height:1.5;padding:10px;border:1px solid #ccc;border-radius:6px;resize:vertical}
-#cfgMsg{font-size:14px;color:#555}
-.status-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:8px;vertical-align:middle}
-.status-ok{background:#4caf50;box-shadow:0 0 6px #4caf50}
-.status-fail{background:#f44336;box-shadow:0 0 6px #f44336}
-.status-unknown{background:#9e9e9e}
+th,td{border-bottom:1px solid var(--line);padding:12px;text-align:left;vertical-align:middle}
+th{background:#f8fafc;font-weight:600;color:#374151;white-space:nowrap;font-size:13px}
+tbody tr:hover{background:#f9fafb}
+tbody tr:last-child td{border-bottom:none}
+code{background:#eef2f7;padding:2px 6px;border-radius:5px;font-size:13px}
+.bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+button{cursor:pointer;padding:8px 16px;border:1px solid #d7dce5;border-radius:8px;background:#fff;color:#1f2937;font-size:14px;font-family:inherit;transition:background .15s,border-color .15s,box-shadow .15s}
+button:hover{background:#f3f4f6;border-color:#c3c9d4}
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid rgba(37,99,235,.35);outline-offset:1px}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+button.primary:hover{background:var(--accent-dark);border-color:var(--accent-dark)}
+button.danger{background:#fff;color:var(--danger);border-color:#f0b4b4}
+button.danger:hover{background:#fef2f2;border-color:var(--danger)}
+input[type=text],select{padding:8px 11px;border:1px solid #d7dce5;border-radius:8px;font-size:13px;font-family:inherit;background:#fff;color:var(--text)}
+#sub{flex:1 1 320px;min-width:200px;font-family:ui-monospace,Consolas,monospace}
+#msg{font-size:14px;color:var(--muted);min-width:180px}
+#search{flex:1 1 240px;min-width:180px}
+#statusFilter{background:#fff}
+details{margin:16px 0 0}
+summary{cursor:pointer;font-weight:600;padding:6px 0;color:#111827;font-size:15px}
+summary::marker{color:var(--accent)}
+.hint{color:var(--muted);font-size:13px;margin:8px 0}
+#cfg{width:100%;min-height:260px;font-family:ui-monospace,Consolas,monospace;font-size:13px;line-height:1.55;padding:12px;border:1px solid #d7dce5;border-radius:8px;resize:vertical;background:#fbfcfe}
+#cfgMsg{font-size:14px;color:var(--muted)}
+.status-dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:8px;vertical-align:middle}
+.status-ok{background:var(--ok);box-shadow:0 0 6px rgba(22,163,74,.5)}
+.status-fail{background:#ef4444;box-shadow:0 0 6px rgba(239,68,68,.5)}
+.status-unknown{background:#9ca3af}
 .truncate{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:middle}
-.badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:12px;background:#e3f2fd;color:#1565c0;margin-left:6px}
-.badge-ct{background:#fff3e0;color:#e65100}
-.badge-wl{background:#e8f5e9;color:#2e7d32}
-.badge-rl{background:#f3e5f5;color:#6a1b9a}
-.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:100;align-items:center;justify-content:center}
+.badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;background:#eff6ff;color:#1d4ed8;margin-left:6px;white-space:nowrap}
+.badge-ct{background:#fff7ed;color:#c2410c}
+.badge-wl{background:#ecfdf5;color:#047857}
+.badge-rl{background:#f5f3ff;color:#6d28d9}
+.discover{border:1px dashed #cfd6e2;background:#fafbfe;border-radius:10px;padding:12px;margin:10px 0 14px}
+.discover-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+#discoverInput{flex:1 1 280px;min-width:200px}
+.dropdown{position:relative;flex:0 0 auto}
+#discoverToggle{min-width:136px}
+#discoverToggle .pill{display:inline-block;min-width:20px;padding:0 6px;margin-left:4px;border-radius:999px;background:var(--accent);color:#fff;font-size:12px;line-height:18px;text-align:center}
+.dropdown-panel{display:none;position:absolute;top:calc(100% + 6px);right:0;left:auto;z-index:40;width:min(460px,calc(100vw - 32px));max-height:70vh;background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 32px rgba(16,24,40,.16);overflow:hidden}
+.dropdown.open .dropdown-panel{display:block}
+.dropdown-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 12px;border-bottom:1px solid var(--line);background:#f8fafc;font-size:13px}
+.dropdown-head label{display:flex;align-items:center;gap:7px;cursor:pointer;font-weight:600}
+.dropdown-head .muted{color:var(--muted)}
+.dropdown-list{max-height:320px;overflow:auto}
+.dropdown-item{display:flex;align-items:center;gap:9px;padding:8px 12px;border-bottom:1px solid #f1f3f7;font-size:13px;cursor:pointer}
+.dropdown-item:last-child{border-bottom:none}
+.dropdown-item:hover{background:#f5f8ff}
+.dropdown-item.disabled{opacity:.55;cursor:not-allowed;background:#fafafa}
+.dropdown-item input{margin:0;accent-color:var(--accent);flex:0 0 auto}
+.dropdown-item .domain{font-family:ui-monospace,Consolas,monospace;color:#111827;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.dropdown-item .meta{color:var(--muted);font-size:12px;white-space:nowrap}
+.dropdown-empty{padding:18px 12px;text-align:center;color:var(--muted);font-size:13px}
+.table-tools{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:10px}
+.table-tools .left{display:flex;gap:10px;align-items:center}
+#selCount{font-size:13px;color:var(--muted)}
+.select-cell{width:42px}
+.select-cell input{width:15px;height:15px;accent-color:var(--accent);cursor:pointer;margin:0}
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(17,24,39,.45);z-index:100;align-items:center;justify-content:center;padding:16px}
 .modal-overlay.show{display:flex}
-.modal{background:#fff;border-radius:10px;padding:24px;width:90%;max-width:520px;max-height:80vh;overflow:auto;box-shadow:0 8px 30px rgba(0,0,.15)}
+.modal{background:#fff;border-radius:12px;padding:24px;width:90%;max-width:560px;max-height:82vh;overflow:auto;box-shadow:0 20px 50px rgba(16,24,40,.25)}
 .modal h3{margin:0 0 16px;font-size:16px}
-.modal .progress{margin:12px 0;height:6px;background:#eee;border-radius:3px;overflow:hidden}
-.modal .progress-bar{height:100%;width:0%;background:#1976d2;transition:width .3s}
-.modal .result-list{max-height:300px;overflow:auto;border:1px solid #eee;border-radius:6px;padding:8px;margin-top:12px}
-.modal .result-item{display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:4px;font-size:13px}
-.modal .result-item:hover{background:#f5f5f5}
+.modal .progress{margin:12px 0;height:6px;background:#eef1f6;border-radius:3px;overflow:hidden}
+.modal .progress-bar{height:100%;width:0%;background:var(--accent);transition:width .3s}
+.modal .result-list{max-height:320px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:8px;margin-top:12px}
+.modal .result-item{display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:6px;font-size:13px}
+.modal .result-item:hover{background:#f6f8fb}
 .modal .result-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
-.modal .result-ok .result-dot{background:#4caf50}
-.modal .result-fail .result-dot{background:#f44336}
+.modal .result-ok .result-dot{background:var(--ok)}
+.modal .result-fail .result-dot{background:#ef4444}
 .modal .result-info{flex:1;min-width:0}
-.modal .result-domain{font-family:monospace;color:#333}
+.modal .result-domain{font-family:ui-monospace,Consolas,monospace;color:#111827}
 .modal .result-source{font-size:11px;padding:1px 6px;border-radius:8px}
-.modal .result-ips{color:#666;font-size:12px;font-family:monospace}
-.modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:16px;padding-top:16px;border-top:1px solid #eee}
+.modal .result-ips{color:var(--muted);font-size:12px;font-family:ui-monospace,Consolas,monospace}
+.modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:16px;padding-top:16px;border-top:1px solid var(--line)}
 .table-row-hidden{display:none}
 .pagination{display:flex;gap:6px;justify-content:center;margin-top:16px}
 .pagination button{padding:5px 12px;font-size:13px}
-.pagination button.active{background:#1976d2;color:#fff;border-color:#1976d2}
+.pagination button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
 @media (max-width:768px){
-  body{padding:0 10px}
+  body{padding:18px 12px 40px}
+  h1{font-size:24px}
   table{font-size:13px}
-  th,td{padding:8px 6px}
-  .truncate{max-width:160px}
+  th,td{padding:9px 7px}
+  .truncate{max-width:150px}
+  .card{padding:14px}
+  #discoverInput{flex:1 1 100%}
 }
 </style>
 </head><body>
 <h1>hosts-optimizer</h1>
-<p>生成于 {{.GeneratedAt}} · 每 {{.ScheduleMinutes}} 分钟轮询 · 有效 {{.ActiveCount}}/{{.DomainCount}} 个域名</p>
+<p class="sub">生成于 {{.GeneratedAt}} · 每 {{.ScheduleMinutes}} 分钟轮询 · 有效 {{.ActiveCount}}/{{.DomainCount}} 个域名</p>
 
+<div class="card">
 <div class="bar">
 <input id="sub" type="text" readonly>
 <button id="copy" type="button">复制订阅地址</button>
@@ -606,12 +728,32 @@ summary{cursor:pointer;font-weight:600;padding:6px 0;color:#333}
 <span id="msg"></span>
 </div>
 
-<p>在 AdGuard Home、过滤器 -> DNS 重写清单、添加上述地址，更新间隔设为 1 小时（推荐子域名且开启 AAAA 返回 NODATA）；亦可用 <code>/hosts.txt</code>。详见 <code>/status.json</code></p>
+<p class="hint">在 AdGuard Home、过滤器 -> DNS 重写清单、添加上述地址，更新间隔设为 1 小时（推荐子域名且开启 AAAA 返回 NODATA）；亦可用 <code>/hosts.txt</code>。详见 <code>/status.json</code></p>
 {{if not .Ready}}<p style="color:#d32f2f">暂无有效 IP：请先添加域名并触发一轮轮询</p>{{end}}
+</div>
 
+<div class="card">
 <details>
 <summary>编辑域名清单 (domains.json)</summary>
-<p class="hint">保存前会校验：JSON 格式、域名合法、probe_dns 必须为字面 IP 等。配置会被固化且<strong>不会覆盖</strong>原文件；保存后点"生效"触发新一轮生成。</p>
+<div class="discover">
+  <div class="discover-row">
+    <input id="discoverInput" type="text" placeholder="输入主域名，如 github.com" spellcheck="false" autocomplete="off">
+    <button id="discoverBtn" type="button" class="primary">获取域名列表</button>
+    <div class="dropdown" id="discoverDropdown">
+      <button id="discoverToggle" type="button" disabled>选择域名<span class="pill" id="discoverCount">0</span></button>
+      <div class="dropdown-panel">
+        <div class="dropdown-head">
+          <label><input type="checkbox" id="discoverAll"> 全选</label>
+          <span class="muted" id="discoverSummary">尚未获取</span>
+        </div>
+        <div class="dropdown-list" id="discoverList"><div class="dropdown-empty">输入主域名后点「获取域名列表」</div></div>
+      </div>
+    </div>
+    <button id="discoverAdd" type="button" disabled>添加</button>
+  </div>
+  <p class="hint" id="discoverMsg">输入主域名后会从 CT 日志、字典与规则中发现相关子域名；勾选后点「添加」写入下方配置，再点「保存并生效」。</p>
+</div>
+<p class="hint">保存前会校验：JSON 格式、域名合法、probe_dns 必须为字面 IP 等。配置会被固化且<strong>不会覆盖</strong>原文件；保存后点「生效」触发新一轮生成。</p>
 <div class="bar">
 <button id="cfgLoad" type="button">重新加载</button>
 <button id="cfgSave" type="button">保存</button>
@@ -620,9 +762,19 @@ summary{cursor:pointer;font-weight:600;padding:6px 0;color:#333}
 </div>
 <textarea id="cfg" spellcheck="false"></textarea>
 </details>
+</div>
 
+<div class="card">
+<div class="table-tools">
+  <div class="left">
+    <span id="selCount">已选 0 个域名</span>
+    <button id="batchDelete" type="button" class="danger" disabled>删除选中</button>
+  </div>
+  <span class="hint" style="margin:0">勾选后可批量从配置中删除，保存后生效</span>
+</div>
 <table><thead>
 <tr>
+  <th class="select-cell"><input type="checkbox" id="selectAll" title="全选筛选结果"></th>
   <th style="width:20%">域名</th>
   <th style="width:16%">优选 IP</th>
   <th style="width:8%">延迟</th>
@@ -633,6 +785,7 @@ summary{cursor:pointer;font-weight:600;padding:6px 0;color:#333}
 </thead><tbody>
 {{range $i, $d := .Domains}}
 <tr data-name="{{$d.Name}}" data-ip="{{$d.IP}}" data-reason="{{$d.Reason}}" data-status="{{$d.Validated}}">
+  <td class="select-cell"><input type="checkbox" class="row-check" value="{{$d.Name}}"></td>
   <td class="truncate" title="{{$d.Name}}">{{$d.Name}}</td>
   <td class="truncate" title="{{$d.IP}}">{{$d.IP}}</td>
   <td>{{$d.LatencyMS}} ms</td>
@@ -651,6 +804,7 @@ summary{cursor:pointer;font-weight:600;padding:6px 0;color:#333}
 </tbody></table>
 
 <div class="pagination" id="pagination"></div>
+</div>
 
 <div class="modal-overlay" id="expandModal">
   <div class="modal">
@@ -676,24 +830,49 @@ summary{cursor:pointer;font-weight:600;padding:6px 0;color:#333}
     catch (e) { msg.textContent = "请手动复制上方的地址"; }
   };
   var btn = document.getElementById("refresh");
-  btn.onclick = function () {
-    btn.disabled = true;
-    msg.textContent = "正在轮询，请稍等";
+  // 刷新改为后台任务：POST 拿到 task_id 后轮询状态，避免长请求卡住页面。
+  function startRefresh(statusEl, done) {
+    statusEl.textContent = "正在轮询，请稍等";
     fetch("/refresh", { method: "POST" })
-      .then(function (r) { return r.json(); })
-      .then(function (j) {
-        if (j.ok) {
-          msg.textContent = "完成，即将刷新页面";
-          setTimeout(function () { location.reload(); }, 800);
-        } else {
-          msg.textContent = "失败: " + (j.error || "未知错误");
-          btn.disabled = false;
+      .then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
+      .then(function (x) {
+        if (!x.body.ok || !x.body.task_id) {
+          throw new Error(x.body.error || ("HTTP " + x.status));
         }
+        var taskId = x.body.task_id;
+        var timer = setInterval(function () {
+          fetch("/api/refresh-status?task_id=" + encodeURIComponent(taskId))
+            .then(function (r) { return r.json(); })
+            .then(function (s) {
+              if (s.state === "running") {
+                statusEl.textContent = "正在轮询，请稍等";
+                return;
+              }
+              clearInterval(timer);
+              if (s.state === "done") {
+                statusEl.textContent = "完成，即将刷新页面";
+                if (done) done(true);
+                setTimeout(function () { location.reload(); }, 600);
+                return;
+              }
+              statusEl.textContent = "失败: " + (s.error || "未知错误");
+              if (done) done(false);
+            })
+            .catch(function (e) {
+              clearInterval(timer);
+              statusEl.textContent = "状态查询失败: " + e;
+              if (done) done(false);
+            });
+        }, 1000);
       })
       .catch(function (e) {
-        msg.textContent = "请求失败: " + e;
-        btn.disabled = false;
+        statusEl.textContent = "请求失败: " + e.message;
+        if (done) done(false);
       });
+  }
+  btn.onclick = function () {
+    btn.disabled = true;
+    startRefresh(msg, function () { btn.disabled = false; });
   };
 
   var cfg = document.getElementById("cfg");
@@ -725,23 +904,173 @@ summary{cursor:pointer;font-weight:600;padding:6px 0;color:#333}
         cfgMsg.textContent = "已保存，点\"生效\"触发生成";
         return;
       }
-      cfgMsg.textContent = "已保存，正在轮询...";
-      fetch("/refresh", { method: "POST" })
-        .then(function (r) { return r.json(); })
-        .then(function (j) {
-          if (j.ok) {
-            cfgMsg.textContent = "已保存并完成轮询，即将刷新页面";
-            setTimeout(function () { location.reload(); }, 800);
-          } else {
-            cfgMsg.textContent = "轮询失败: " + (j.error || "未知错误");
-          }
-        });
+      startRefresh(cfgMsg);
     }).catch(function (e) { cfgMsg.textContent = "保存失败: " + e; });
   }
   document.getElementById("cfgLoad").onclick = loadCfg;
   document.getElementById("cfgSave").onclick = function () { saveCfg(false); };
   document.getElementById("cfgSaveRun").onclick = function () { saveCfg(true); };
   loadCfg();
+
+  // 域名发现：输入主域名 -> 获取相关子域名 -> 勾选 -> 添加到配置
+  var discoverInput = document.getElementById("discoverInput");
+  var discoverBtn = document.getElementById("discoverBtn");
+  var discoverDropdown = document.getElementById("discoverDropdown");
+  var discoverToggle = document.getElementById("discoverToggle");
+  var discoverListEl = document.getElementById("discoverList");
+  var discoverAll = document.getElementById("discoverAll");
+  var discoverCount = document.getElementById("discoverCount");
+  var discoverAdd = document.getElementById("discoverAdd");
+  var discoverMsg = document.getElementById("discoverMsg");
+  var discoverSummary = document.getElementById("discoverSummary");
+  var discovered = [];
+
+  function openDropdown(open) {
+    discoverDropdown.classList.toggle("open", open);
+  }
+  discoverToggle.onclick = function () {
+    openDropdown(!discoverDropdown.classList.contains("open"));
+  };
+  document.addEventListener("click", function (e) {
+    if (!discoverDropdown.contains(e.target)) openDropdown(false);
+  });
+
+  function checkedDomains() {
+    return discovered.filter(function (r) { return r.checked && r.resolved; })
+      .map(function (r) { return r.domain; });
+  }
+  function refreshDiscoverState() {
+    var n = checkedDomains().length;
+    discoverCount.textContent = String(n);
+    discoverAdd.disabled = n === 0;
+    var resolvedList = discovered.filter(function (r) { return r.resolved; });
+    discoverSummary.textContent = discovered.length
+      ? "共 " + discovered.length + " 个，" + resolvedList.length + " 个可解析"
+      : "尚未获取";
+    discoverAll.disabled = resolvedList.length === 0;
+    discoverAll.checked = resolvedList.length > 0 && resolvedList.every(function (r) { return r.checked; });
+  }
+  function renderDiscovered() {
+    discoverListEl.innerHTML = "";
+    if (discovered.length === 0) {
+      var empty = document.createElement("div");
+      empty.className = "dropdown-empty";
+      empty.textContent = "没有发现可用的相关域名";
+      discoverListEl.appendChild(empty);
+      refreshDiscoverState();
+      return;
+    }
+    discovered.forEach(function (r) {
+      var item = document.createElement("label");
+      item.className = "dropdown-item" + (r.resolved ? "" : " disabled");
+      var box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = r.checked;
+      box.disabled = !r.resolved;
+      box.onchange = function () { r.checked = box.checked; refreshDiscoverState(); };
+      var name = document.createElement("span");
+      name.className = "domain";
+      name.textContent = r.domain;
+      name.title = r.domain;
+      var meta = document.createElement("span");
+      meta.className = "meta";
+      if (r.resolved) {
+        meta.textContent = (r.ips && r.ips.length ? r.ips[0] : "") +
+          (r.ips && r.ips.length > 1 ? " +" + (r.ips.length - 1) : "");
+      } else {
+        meta.textContent = "不可解析";
+      }
+      item.appendChild(box);
+      item.appendChild(name);
+      item.appendChild(meta);
+      discoverListEl.appendChild(item);
+    });
+    refreshDiscoverState();
+  }
+
+  discoverAll.onchange = function () {
+    var checked = discoverAll.checked;
+    discovered.forEach(function (r) { if (r.resolved) r.checked = checked; });
+    renderDiscovered();
+  };
+
+  discoverBtn.onclick = function () {
+    var raw = discoverInput.value.trim();
+    if (!raw) {
+      discoverMsg.textContent = "请先输入主域名，如 github.com";
+      discoverInput.focus();
+      return;
+    }
+    raw = raw.replace(/^[a-zA-Z]+:\/\//, "").replace(/\/.*$/, "").toLowerCase();
+    discoverBtn.disabled = true;
+    discoverMsg.textContent = "正在发现 " + raw + " 的相关域名...";
+    discovered = [];
+    renderDiscovered();
+    fetch("/api/expand", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ domain: raw, sources: ["ct", "wordlist", "rules"] })
+    }).then(function (r) { return r.json(); })
+      .then(function (j) {
+        discoverBtn.disabled = false;
+        if (!j.ok) {
+          discoverMsg.textContent = "获取失败: " + (j.error || "未知错误");
+          return;
+        }
+        discovered = (j.results || []).map(function (r) {
+          return { domain: r.domain, resolved: !!r.resolved, ips: r.ips || [], checked: !!r.resolved };
+        }).sort(function (a, b) {
+          if (a.resolved !== b.resolved) return a.resolved ? -1 : 1;
+          return a.domain < b.domain ? -1 : (a.domain > b.domain ? 1 : 0);
+        });
+        renderDiscovered();
+        var resolvedCount = discovered.filter(function (r) { return r.resolved; }).length;
+        discoverToggle.disabled = discovered.length === 0;
+        discoverMsg.textContent = "发现 " + discovered.length + " 个相关域名，" +
+          resolvedCount + " 个可解析，已默认勾选可解析项。";
+        if (discovered.length > 0) openDropdown(true);
+      })
+      .catch(function (e) {
+        discoverBtn.disabled = false;
+        discoverMsg.textContent = "请求失败: " + e;
+      });
+  };
+  discoverInput.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      discoverBtn.click();
+    }
+  });
+
+  discoverAdd.onclick = function () {
+    var names = checkedDomains();
+    if (names.length === 0) return;
+    var cfgObj;
+    try {
+      cfgObj = JSON.parse(cfg.value);
+    } catch (e) {
+      discoverMsg.textContent = "配置解析失败，请先修正 domains.json 再添加";
+      return;
+    }
+    if (!Array.isArray(cfgObj.domains)) cfgObj.domains = [];
+    var existing = new Set(cfgObj.domains.map(function (d) { return d && d.name; }));
+    var added = 0;
+    names.forEach(function (n) {
+      if (!existing.has(n)) {
+        cfgObj.domains.push({ name: n, expand: false });
+        existing.add(n);
+        added++;
+      }
+    });
+    if (added > 0) {
+      cfg.value = JSON.stringify(cfgObj, null, 2);
+      discoverMsg.textContent = "已添加 " + added + " 个域名到配置，请点下方「保存并生效」写入";
+      cfgMsg.textContent = "待保存：" + added + " 个新域名";
+      openDropdown(false);
+    } else {
+      discoverMsg.textContent = "勾选的域名都已存在于配置中";
+    }
+  };
 
   // 搜索筛选
   var searchInput = document.getElementById("search");
@@ -750,6 +1079,7 @@ summary{cursor:pointer;font-weight:600;padding:6px 0;color:#333}
   var pagination = document.getElementById("pagination");
   var currentPage = 1;
   var pageSize = 20;
+  var filteredRows = [];
 
   function filterRows() {
     var kw = searchInput.value.trim().toLowerCase();
@@ -764,7 +1094,9 @@ summary{cursor:pointer;font-weight:600;padding:6px 0;color:#333}
       var statusMatch = st === "all" || (st === "ok" && validated) || (st === "fail" && !validated);
       if (match && statusMatch) visible.push(tr);
     });
+    filteredRows = visible;
     renderPagination(visible);
+    updateSelection();
   }
   function renderPagination(visible) {
     var total = visible.length;
@@ -800,6 +1132,66 @@ summary{cursor:pointer;font-weight:600;padding:6px 0;color:#333}
   }
   searchInput.addEventListener("input", function() { currentPage = 1; filterRows(); });
   statusFilter.addEventListener("change", function() { currentPage = 1; filterRows(); });
+
+  // 表格勾选与批量删除
+  var selectAll = document.getElementById("selectAll");
+  var selCount = document.getElementById("selCount");
+  var batchDelete = document.getElementById("batchDelete");
+
+  function rowChecks() {
+    return Array.prototype.slice.call(document.querySelectorAll(".row-check"));
+  }
+  function selectedNames() {
+    return rowChecks().filter(function (c) { return c.checked; })
+      .map(function (c) { return c.value; });
+  }
+  function updateSelection() {
+    var total = selectedNames().length;
+    selCount.textContent = "已选 " + total + " 个域名";
+    batchDelete.disabled = total === 0;
+    selectAll.checked = filteredRows.length > 0 && filteredRows.every(function (tr) {
+      var c = tr.querySelector(".row-check");
+      return c && c.checked;
+    });
+  }
+  selectAll.onchange = function () {
+    filteredRows.forEach(function (tr) {
+      var c = tr.querySelector(".row-check");
+      if (c) c.checked = selectAll.checked;
+    });
+    updateSelection();
+  };
+  document.querySelectorAll(".row-check").forEach(function (c) {
+    c.onchange = updateSelection;
+  });
+  batchDelete.onclick = function () {
+    var names = selectedNames();
+    if (names.length === 0) return;
+    if (!confirm("确定从配置中删除选中的 " + names.length + " 个域名？删除后需点「保存并生效」。")) return;
+    var cfgObj;
+    try {
+      cfgObj = JSON.parse(cfg.value);
+    } catch (e) {
+      msg.textContent = "配置解析失败: " + e;
+      return;
+    }
+    var remove = new Set(names);
+    var before = Array.isArray(cfgObj.domains) ? cfgObj.domains.length : 0;
+    cfgObj.domains = (cfgObj.domains || []).filter(function (d) {
+      return !(d && remove.has(d.name));
+    });
+    var removed = before - cfgObj.domains.length;
+    cfg.value = JSON.stringify(cfgObj, null, 2);
+    cfgMsg.textContent = "已从配置移除 " + removed + " 个域名，请点「保存并生效」写入";
+    msg.textContent = "已移除 " + removed + " 个域名";
+    var details = document.querySelector("details");
+    if (details) {
+      details.open = true;
+      details.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    updateSelection();
+  };
+
   filterRows();
 
   // 展开域名模态框
@@ -909,29 +1301,17 @@ summary{cursor:pointer;font-weight:600;padding:6px 0;color:#333}
     }
   };
 
-  // 单独刷新域名
-  document.querySelectorAll(".refresh-btn").forEach(function(btn) {
-    btn.onclick = function() {
-      var domain = btn.dataset.domain;
-      btn.disabled = true;
-      btn.textContent = "刷新中...";
-      fetch("/refresh", { method: "POST" })
-        .then(function(r) { return r.json(); })
-        .then(function(j) {
-          btn.disabled = false;
-          btn.textContent = "刷新";
-          if (j.ok) {
-            msg.textContent = domain + " 刷新完成，即将刷新页面";
-            setTimeout(function () { location.reload(); }, 800);
-          } else {
-            msg.textContent = "刷新失败: " + (j.error || "未知错误");
-          }
-        })
-        .catch(function(e) {
-          btn.disabled = false;
-          btn.textContent = "刷新";
-          msg.textContent = "请求失败: " + e;
-        });
+  // 单独刷新域名（实际触发一轮全量探测，按钮仅作快捷入口）
+  document.querySelectorAll(".refresh-btn").forEach(function(rowBtn) {
+    rowBtn.onclick = function() {
+      var domain = rowBtn.dataset.domain;
+      rowBtn.disabled = true;
+      rowBtn.textContent = "刷新中...";
+      msg.textContent = "正在刷新 " + domain + " 等域名，请稍等";
+      startRefresh(msg, function() {
+        rowBtn.disabled = false;
+        rowBtn.textContent = "刷新";
+      });
     };
   });
 })();
