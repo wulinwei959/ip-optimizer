@@ -2353,6 +2353,26 @@ a.about-value:hover{text-decoration:underline}
     "com.ru": 1, "com.mx": 1
   };
 
+  // 分组展开状态只由用户手动操作写入；禁用/切换/刷新导致页面重载时据此恢复，
+  // 绝不因为一次禁用或勾选就自动收起所有分组。
+  function readGroupOpenState() {
+    try { return JSON.parse(localStorage.getItem("ho-group-open") || "{}"); }
+    catch (e) { return {}; }
+  }
+  function writeGroupOpenState(state) {
+    try { localStorage.setItem("ho-group-open", JSON.stringify(state)); } catch (e) {}
+  }
+  function setGroupOpen(g, open, persist) {
+    g.open = open;
+    g.head.classList.toggle("open", open);
+    g.caret.textContent = open ? "▼" : "▶";
+    if (persist) {
+      var state = readGroupOpenState();
+      state[g.base] = open;
+      writeGroupOpenState(state);
+    }
+  }
+
   function baseDomain(name) {
     var parts = String(name || "").toLowerCase().split(".").filter(Boolean);
     if (parts.length <= 2) return parts.join(".");
@@ -2363,10 +2383,11 @@ a.about-value:hover{text-decoration:underline}
 
   function buildGroups() {
     var map = {};
+    var savedOpen = readGroupOpenState();
     rows.forEach(function (tr) {
       var base = baseDomain(tr.dataset.name);
       if (!map[base]) {
-        map[base] = { base: base, rows: [], open: false, visible: [] };
+        map[base] = { base: base, rows: [], open: !!savedOpen[base], visible: [] };
         groups.push(map[base]);
       }
       map[base].rows.push(tr);
@@ -2389,7 +2410,7 @@ a.about-value:hover{text-decoration:underline}
       toggle.className = "group-toggle";
       var caret = document.createElement("span");
       caret.className = "caret";
-      caret.textContent = "▶";
+      caret.textContent = g.open ? "▼" : "▶";
       var groupName = document.createElement("span");
       groupName.className = "group-name";
       groupName.textContent = g.base;
@@ -2435,11 +2456,10 @@ a.about-value:hover{text-decoration:underline}
       g.disableCheck = groupDisable;
 
       toggle.onclick = function () {
-        g.open = !g.open;
-        head.classList.toggle("open", g.open);
-        caret.textContent = g.open ? "▼" : "▶";
+        setGroupOpen(g, !g.open, true);
         applyFilter();
       };
+      head.classList.toggle("open", g.open);
       groupCheck.onchange = function () {
         g.visible.forEach(function (tr) {
           var c = tr.querySelector(".row-check");
@@ -2487,10 +2507,18 @@ a.about-value:hover{text-decoration:underline}
       g.visible = visible;
       filteredRows = filteredRows.concat(visible);
       g.head.classList.toggle("table-row-hidden", visible.length === 0);
-      if (kw && visible.length > 0) {
+      // 搜索命中时临时展开以露出结果，但不写入持久状态：清空关键词后
+      // 仍按用户上次的手动选择显示，避免搜索意外改变分组开合。
+      if (kw && visible.length > 0 && !g.open) {
         g.open = true;
         g.head.classList.add("open");
         g.caret.textContent = "▼";
+        g.autoOpened = true;
+      } else if (!kw && g.autoOpened) {
+        g.open = false;
+        g.head.classList.remove("open");
+        g.caret.textContent = "▶";
+        g.autoOpened = false;
       }
       g.rows.forEach(function (tr) {
         tr.classList.toggle("table-row-hidden", !g.open || visible.indexOf(tr) < 0);
@@ -2600,17 +2628,13 @@ a.about-value:hover{text-decoration:underline}
   });
   expandAllBtn.onclick = function () {
     groups.forEach(function (g) {
-      g.open = true;
-      g.head.classList.add("open");
-      g.caret.textContent = "▼";
+      setGroupOpen(g, true, true);
     });
     applyFilter();
   };
   collapseAllBtn.onclick = function () {
     groups.forEach(function (g) {
-      g.open = false;
-      g.head.classList.remove("open");
-      g.caret.textContent = "▶";
+      setGroupOpen(g, false, true);
     });
     applyFilter();
   };
