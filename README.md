@@ -14,7 +14,7 @@
 
 仓库：<https://github.com/wulinwei959/ip-optimizer>
 
-当前版本：**1.0.15**（版本历史与验证记录见 [`docs/progress.md`](docs/progress.md)）
+当前版本：**1.1.0**（版本历史与验证记录见 [`docs/progress.md`](docs/progress.md)）
 
 ---
 
@@ -34,6 +34,14 @@ hosts.txt / agh.txt / status.json
 AdGuard Home 订阅
 ```
 
+更快的一条路（推荐，二选一）：
+
+```
+快照更新 → 内存视图原子替换 → UDP DNS 应答器（TTL 默认 60s）
+   ↑ AGH 按域名分流直连：[/github.com/...]127.0.0.1:18053
+```
+```
+
 两条防循环依赖的硬约束：
 
 - `probe_dns` 支持明文 UDP（必须是字面 IP）、DoT（`tls://主机[:853]`）与 DoH（`https://主机/路径`），可混用；所有上游都必须绕开本机 AdGuard Home —— 否则「用待优化的解析结果去找候选 IP」形成循环依赖。DoQ 需要第三方 QUIC 库，本项目坚持零依赖，因此不支持。
@@ -49,7 +57,8 @@ AdGuard Home 订阅
 - **非 root 安全**：`run-as=package`，只做 TCP/TLS 探测（不用 ICMP，因无 `cap_net_raw`），仅监听一个高端口。
 - **失败不覆盖**：整轮校验全灭时保留上一轮产物，`hosts.txt` / `agh.txt` 返回 503 但绝不写空列表；`status.json` 仍为 200 并说明原因。
 - **配置热加载**：每轮重新读取 `domains.json`，增删域名下一轮自动生效；也可 `POST /refresh` 立即重跑，无需重启。
-- **重启可恢复**：启动时从磁盘恢复上一轮产物，不必等首轮探测结束就能对外提供订阅。
+- **重启可恢复**：启动时先读 `status.json` 恢复应答视图，再读磁盘上的本轮产物；不必等首轮探测结束就能对外提供订阅，也不会出现分流域名的解析真空期。
+- **内置 DNS 应答器**：额外监听一个 UDP 端口，把 AGH 送来的域名查询直接答成优选 IP。IP 切换的生效时间从「AGH 订阅刷新间隔（最低 1 小时）」降到「一个 TTL（默认 60 秒）」。域名匹配与 AGH 的 `||domain^` 对齐：精确匹配 + 向父域回退，不做后缀通配。命中但无可用 IP 时返回 `REFUSED`，宁可解析失败也不返回旧 IP。状态页「DNS 应答服务」卡片提供一键复制的分流规则与运行计数。
 - **域名发现**：在「编辑域名清单」输入主域名（如 `github.com`），自动从 CT 日志、字典与规则中发现相关子域名；下拉列表逐项勾选，点「添加」即可写入配置，无需手工抄写。
 - **展开域名弹窗**：域名与来源同排、IP 列表另起一行，长列表独立滚动且不遮挡操作按钮；查询失败时显示原因并可直接重试。
 - **统一命名与排版**：页面标题、窗口标题与应用名称统一为「Hosts 优选订阅」；优化中文字体栈、字号层级、表格等宽数字与图标标识。
@@ -78,14 +87,24 @@ AdGuard Home 订阅
 2. **获取安装包**：`.fpk` 二进制产物不入库（见 `.gitignore`），需本地构建（见下节）或从 Releases 下载（若已发布）。
 3. **安装**：应用中心 → 右上角菜单 → 安装本地应用 → 选择 `.fpk`。安装完全离线。
 4. **打开桌面图标**：若覆盖安装后图标未出现，在 NAS 上执行 `systemctl restart trim_app_center.service` 再刷新桌面。
-5. **配置 AdGuard Home**：在「过滤器 → DNS 封锁清单」添加订阅地址，更新间隔设为 1 小时。
+5. **配置 AdGuard Home**（二选一）：
+
+   **推荐：DNS 应答器。** 打开状态页的「DNS 应答服务」卡片，复制分流规则，粘贴到 AGH 的「设置 → DNS 设置 → 上游 DNS 服务器」末尾：
+
+   ```
+   [/github.com/raw.githubusercontent.com/]127.0.0.1:18053
+   ```
+
+   IP 切换后最多一个 TTL（默认 60 秒）即生效，不受 AGH 的 1 小时订阅刷新间隔限制。
+
+   **兼容：过滤器订阅。** 在「过滤器 → DNS 封锁清单」添加订阅地址，更新间隔设为 1 小时。
 
    ```
    http://<NAS内网IP>:18088/agh.txt     # 推荐
    http://<NAS内网IP>:18088/hosts.txt   # /etc/hosts 语法，精确匹配、不覆盖子域
    ```
 
-   `agh.txt` 使用 `||domain^$dnsrewrite=NOERROR;A;IP`，覆盖子域且让 AAAA 天然返回 NODATA（详见下方「已查证的坑」）。
+   `agh.txt` 使用 `||domain^$dnsrewrite=NOERROR;A;IP`，覆盖子域且让 AAAA 天然返回 NODATA（详见下方「已查证的坑」）。**该方式与上面的 DNS 应答器二选一，不要同时启用。**
 6. **配置域名**：打开状态页，在「编辑域名清单」的图形化表单里调整参数或增删域名；也可输入主域名点「获取域名列表」，勾选后批量添加，最后点「保存并生效」。需要直接改 JSON 时切换到「JSON 源码」，或编辑 `/var/apps/hosts-optimizer-native/etc/domains.json`。
 
 > 若用 HTTPS 访问飞牛桌面，iframe 加载 `http://...:18088` 可能被浏览器按混合内容拦截，表现为窗口空白。此时改用浏览器直接访问 `http://<NAS_IP>:18088/`，或把 `app/ui/config` 的 `type` 改为 `url`。
@@ -166,6 +185,8 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 | `HO_SCHEDULE_MINUTES` | — | 覆盖 `defaults.schedule_minutes` |
 | `HO_PROBE_DNS` | — | 覆盖上游 DNS，逗号分隔；UDP 用字面 IP，也可写 `tls://` / `https://` |
 | `HO_PROBE_CONCURRENCY` | — | 覆盖 `defaults.concurrency` |
+| `HO_DNS_LISTEN` | — | 覆盖 `defaults.dns.listen`；填 off 类词表（`off` / `disabled` / `none` / `0` / `false`）禁用应答器 |
+| `HO_DNS_TTL` | — | 覆盖 `defaults.dns.ttl` |
 
 ### `domains.json`
 
@@ -209,6 +230,7 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 | `GET /api/domains` | 读取 `domains.json` 原文 |
 | `PUT /api/domains` | 校验并原子写回 `domains.json`（要求 `Content-Type: application/json`） |
 | `POST /api/expand` | 按需发现主域名的相关子域名，返回解析结果（不修改配置） |
+| `GET /api/dns` | 应答器状态：`enabled` / `listen` / `addr` / `ttl` / 运行计数 / `agh_upstream` 分流规则 |
 
 文本端点返回 `ETag` / `Last-Modified`，支持 `If-None-Match` → 304。
 

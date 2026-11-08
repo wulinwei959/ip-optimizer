@@ -57,18 +57,24 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 应用中心 → 右上角菜单 → 安装本地应用 → 选择 .fpk
 ```
 
-订阅地址：推荐 `http://<NAS内网IP>:18088/agh.txt`（覆盖子域且 AAAA 天然 NODATA），或 `http://<NAS内网IP>:18088/hosts.txt`。在 AdGuard Home「过滤器 → DNS 封锁清单」添加，更新间隔改为 1 小时。安装后也可从桌面图标打开的状态页一键复制订阅地址。
+**接入 AdGuard Home（二选一，不要同时启用）**
+
+- **推荐：DNS 应答器。** 打开状态页「DNS 应答服务」卡片，复制分流规则，粘贴到 AGH 的「设置 → DNS 设置 → 上游 DNS 服务器」末尾，形如 `[/github.com/raw.githubusercontent.com/]127.0.0.1:18053`。IP 切换后最多一个 TTL（默认 60 秒）即生效，不受 AGH 订阅刷新间隔限制。
+- **兼容：过滤器订阅。** 订阅地址推荐 `http://<NAS内网IP>:18088/agh.txt`（覆盖子域且 AAAA 天然 NODATA），或 `http://<NAS内网IP>:18088/hosts.txt`。在 AdGuard Home「过滤器 → DNS 封锁清单」添加，更新间隔改为 1 小时。安装后也可从桌面图标打开的状态页一键复制订阅地址。
+
+应答器的 UDP 端口（默认 `18053`）与 HTTP 端口（`18088`）是两条独立链路，FPK 只需 `service_port=18088`；DNS 端口由 `defaults.dns.listen` 控制。
 
 打包校验要求：`manifest`、`config/privilege`(JSON)、`config/resource`(JSON)、`ICON.PNG`(64×64)、`ICON_256.PNG`(256×256)、`app/`、`cmd/`、`wizard/` 齐全。图标已替换为正式版本，修改时从 `deploy/icon-source.png` 重新导出 64/256 两档。
 
 ## 核心必须遵守的接口契约
 
 - 单端口 HTTP：FPK 进程/宿主 `18088`（`TRIM_SERVICE_PORT`），Compose 容器内 `8088`
-- 路径：`/`、`/hosts.txt`、`/agh.txt`、`/status.json`
+- 路径：`/`、`/hosts.txt`、`/agh.txt`、`/status.json`、`/api/dns`
 - `HO_*` 环境变量：
   - `HO_CONFIG`（`$TRIM_PKGETC`，内含 `domains.json`）、`HO_OUTPUT`、`HO_STATE`
   - `HO_PORT`、`HO_TZ`、`HO_CA_BUNDLE`
   - `HO_SCHEDULE_MINUTES`（可选覆盖配置）、`HO_PROBE_DNS`、`HO_PROBE_CONCURRENCY`
+  - `HO_DNS_LISTEN`、`HO_DNS_TTL`（应答器监听地址与 TTL；前者接受 off 类词表禁用）
 - 非 root 运行：**只做 TCP/TLS 探测，不用 ICMP**
 - 原子写；整轮校验全灭时保留上一轮结果，绝不写空文件；产物至少含 1 条规则
 
