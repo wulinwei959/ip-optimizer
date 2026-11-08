@@ -36,22 +36,29 @@ type Domain struct {
 
 // Defaults 是全局默认值，可被单个域名覆盖。
 type Defaults struct {
-	ScheduleMinutes        int      `json:"schedule_minutes"`
-	ProbeDNS               []string `json:"probe_dns"`
-	ProbePort              int      `json:"probe_port"`
-	Concurrency            int      `json:"concurrency"`
-	HysteresisPercent      int      `json:"hysteresis_percent"`
-	HysteresisRounds       int      `json:"hysteresis_rounds"`
-	ExpectStatus           []int    `json:"expect_status"`
-	Outputs                []string `json:"outputs"`
-	MaxCandidates          int      `json:"max_candidates"`
-	TCPRounds              int      `json:"tcp_rounds"`
-	TimeoutSeconds         int      `json:"timeout_seconds"`
-	ExpandConcurrency      int      `json:"expand_concurrency"`
-	ExpandTimeoutSeconds   int      `json:"expand_timeout_seconds"`
-	ExpandMaxSubdomains    int      `json:"expand_max_subdomains"`
-	ExpandSources          []string `json:"expand_sources"`
-	HistoryRetentionMonths int      `json:"history_retention_months"`
+	ScheduleMinutes        int       `json:"schedule_minutes"`
+	ProbeDNS               []string  `json:"probe_dns"`
+	ProbePort              int       `json:"probe_port"`
+	Concurrency            int       `json:"concurrency"`
+	HysteresisPercent      int       `json:"hysteresis_percent"`
+	HysteresisRounds       int       `json:"hysteresis_rounds"`
+	ExpectStatus           []int     `json:"expect_status"`
+	Outputs                []string  `json:"outputs"`
+	MaxCandidates          int       `json:"max_candidates"`
+	TCPRounds              int       `json:"tcp_rounds"`
+	TimeoutSeconds         int       `json:"timeout_seconds"`
+	ExpandConcurrency      int       `json:"expand_concurrency"`
+	ExpandTimeoutSeconds   int       `json:"expand_timeout_seconds"`
+	ExpandMaxSubdomains    int       `json:"expand_max_subdomains"`
+	ExpandSources          []string  `json:"expand_sources"`
+	HistoryRetentionMonths int       `json:"history_retention_months"`
+	DNS                    DNSConfig `json:"dns"`
+}
+
+// DNSConfig 控制内置 DNS 应答器（供 AdGuard Home 上游分流）。
+type DNSConfig struct {
+	Listen string `json:"listen"` // UDP 监听地址 host:port；空字符串表示禁用
+	TTL    int    `json:"ttl"`    // A 记录缓存秒数，决定 IP 切换的收敛上限
 }
 
 // Runtime 是一轮探测所需的全部运行时信息。
@@ -194,6 +201,17 @@ func applyDefaults(c *Config) {
 	if d.HistoryRetentionMonths <= 0 {
 		d.HistoryRetentionMonths = 12
 	}
+	// DNS 应答器默认值：绑定本机回环 + 高端口，与 AdGuard Home 同机部署。
+	// off / disabled / none / 0 / false 归一化为空字符串表示禁用。
+	switch strings.ToLower(strings.TrimSpace(d.DNS.Listen)) {
+	case "":
+		d.DNS.Listen = "127.0.0.1:18053"
+	case "off", "disabled", "none", "0", "false":
+		d.DNS.Listen = ""
+	}
+	if d.DNS.TTL <= 0 {
+		d.DNS.TTL = 60
+	}
 }
 
 func applyEnv(c *Config) error {
@@ -204,9 +222,19 @@ func applyEnv(c *Config) error {
 	}{
 		{"HO_SCHEDULE_MINUTES", &d.ScheduleMinutes},
 		{"HO_PROBE_CONCURRENCY", &d.Concurrency},
+		{"HO_DNS_TTL", &d.DNS.TTL},
 	} {
 		if err := envInt(item.key, item.dst); err != nil {
 			return err
+		}
+	}
+	// DNS 应答器监听地址支持 off 类词表禁用，语义与配置字段一致。
+	if v := strings.TrimSpace(os.Getenv("HO_DNS_LISTEN")); v != "" {
+		switch strings.ToLower(v) {
+		case "off", "disabled", "none", "0", "false":
+			d.DNS.Listen = ""
+		default:
+			d.DNS.Listen = v
 		}
 	}
 	if v := strings.TrimSpace(os.Getenv("HO_PROBE_DNS")); v != "" {
@@ -255,6 +283,23 @@ func validate(c *Config) error {
 	}
 	if d.HistoryRetentionMonths < 1 || d.HistoryRetentionMonths > 120 {
 		return fmt.Errorf("history_retention_months 必须在 1..120，当前 %d", d.HistoryRetentionMonths)
+	}
+	// DNS 应答器校验：TTL 决定切换收敛上限，过小会让 AGH 频繁回源，过大则失去意义。
+	if d.DNS.TTL < 5 || d.DNS.TTL > 3600 {
+		return fmt.Errorf("dns.ttl 必须在 5..3600，当前 %d", d.DNS.TTL)
+	}
+	if d.DNS.Listen != "" {
+		host, portStr, err := net.SplitHostPort(d.DNS.Listen)
+		if err != nil {
+			return fmt.Errorf("dns.listen 必须是 host:port 形式（如 127.0.0.1:18053），当前 %q", d.DNS.Listen)
+		}
+		if host != "" && net.ParseIP(host) == nil {
+			return fmt.Errorf("dns.listen 的 host 必须是 IP 字面量（空 = 全接口），当前 %q", host)
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("dns.listen 的端口必须在 1..65535，当前 %q", portStr)
+		}
 	}
 	validSources := map[string]bool{"ct": true, "wordlist": true, "rules": true}
 	for _, s := range d.ExpandSources {
