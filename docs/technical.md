@@ -270,6 +270,14 @@ TTL 与分流域名清单在 `doRoundFor` 加载配置后每轮跟随；此外 `
 ```
 
 方括号内是**启用域名的完整名**而非注册域：`||domain^` 匹配该域名及全部子域，若只列注册域，已独立配置的子域会被父域规则劫持。禁用/删除域名后该行会即时收缩，需重新粘贴到 AGH。
+### 配置入口
+
+`defaults.dns.listen` / `defaults.dns.ttl` / `defaults.expect_status` / `defaults.outputs`，以及域名级 `expect_status` / `allow_private` / `suppress_aaaa` 都可在「编辑域名清单」的图形化表单内修改；`formToConfig` 对空值一律 `delete`，不会把用户未设置的字段显式写进 `domains.json`。`off` 类词表（`off` / `disabled` / `none` / `0` / `false`）填在监听地址输入框内即可禁用应答器。
+
+### 前端渲染注意点
+
+域名列表使用 `table-layout:fixed`：`table-cell` 的 `max-width` 会被浏览器忽略，不固定列宽时一个超长域名就会把邻列顶开、造成状态文字与按钮重叠。flex 容器内的长文本项必须显式 `min-width:0`，否则 `max-width` + `text-overflow:ellipsis` 不生效。分流行由 `readonly input` 改为 `<pre>`：50+ 个域名在 input 内无法完整查看，且 `<input>` 也不能用 `Range` 可靠全选。
+
 
 ### 重启恢复
 
