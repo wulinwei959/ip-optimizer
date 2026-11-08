@@ -19,10 +19,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"hosts-optimizer/internal/config"
 	"hosts-optimizer/internal/dnsquery"
+	"hosts-optimizer/internal/dnsserver"
 	"hosts-optimizer/internal/expand"
 	"hosts-optimizer/internal/history"
 	"hosts-optimizer/internal/logbuf"
@@ -47,6 +49,12 @@ type App struct {
 	snap         *output.Snapshot
 	roundMu      sync.Mutex
 	lastSchedule int
+
+	// DNS 应答器（AdGuard Home 上游分流模式）
+	dnsSrv      *dnsserver.Server // listen 为空时为 nil（禁用）
+	dnsListen   string
+	dnsTTL      atomic.Int64
+	dnsFamilies []string // 启用域名的完整名，生成 AGH 上游行用
 
 	// 异步刷新任务
 	refreshMu   sync.Mutex
@@ -107,6 +115,8 @@ func New(rt *config.Runtime, version string) (*App, error) {
 		version:      version,
 		lastSchedule: rt.Config.Defaults.ScheduleMinutes,
 	}
+	// 必须先于 recoverSnapshot：恢复流程会刷新应答视图。
+	a.initDNSServer(rt)
 	a.recoverSnapshot()
 	return a, nil
 }
@@ -139,6 +149,14 @@ func buildRootCAs(path string) (*x509.CertPool, error) {
 
 // recoverSnapshot 让服务重启后立刻能对外提供上一轮订阅内容，不必等首轮探测结束。
 func (a *App) recoverSnapshot() {
+	// 先恢复 status.json：即便 hosts.txt / agh.txt 缺失，应答器也能立即服务，
+	// 否则重启后到首轮探测完成前，分流域名会全部 REFUSED，等于自己断网几十秒。
+	if b, err := os.ReadFile(a.statusPath); err == nil {
+		var st output.Status
+		if json.Unmarshal(b, &st) == nil {
+			a.applyDNSSnapshot(&output.Snapshot{Status: st})
+		}
+	}
 	hosts, err1 := os.ReadFile(a.hostsPath)
 	agh, err2 := os.ReadFile(a.aghPath)
 	if err1 != nil || err2 != nil {
@@ -158,6 +176,7 @@ func (a *App) recoverSnapshot() {
 	a.mu.Lock()
 	a.snap = snap
 	a.mu.Unlock()
+	a.applyDNSSnapshot(snap)
 	log.Printf("已从磁盘恢复上一轮产物")
 }
 
@@ -166,17 +185,23 @@ func (a *App) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", a.handle)
 	mux.HandleFunc("/api/refresh-status", a.handleRefreshStatus)
+	mux.HandleFunc("/api/dns", a.handleDNSStats)
 	srv := &http.Server{
 		Addr: ":" + a.port, Handler: mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	errCh := make(chan error, 1)
+	// 容量 2：HTTP 与 DNS 应答器两个生产者，避免任一方的错误阻塞导致 goroutine 泄漏。
+	errCh := make(chan error, 2)
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
 	log.Printf("HTTP 服务已启动，监听 :%s", a.port)
+	// DNS 监听失败属致命错误：返回后进程退出，由 init 系统的 Restart=always 拉起。
+	if a.dnsSrv != nil {
+		go func() { errCh <- a.dnsSrv.Serve(ctx) }()
+	}
 
 	for {
 		select {
@@ -223,6 +248,9 @@ func (a *App) doRoundFor(ctx context.Context, only map[string]bool) (int, error)
 	}
 	a.lastSchedule = rt.Config.Defaults.ScheduleMinutes
 	d := rt.Config.Defaults
+	// DNS 应答器的 TTL 与分流域名清单每轮跟随配置，改完 domains.json 下一轮生效。
+	a.dnsTTL.Store(int64(d.DNS.TTL))
+	a.updateDNSFamilies(rt.Config.Domains)
 	timeout := time.Duration(d.TimeoutSeconds) * time.Second
 	started := time.Now()
 
@@ -332,6 +360,7 @@ func (a *App) doRoundFor(ctx context.Context, only map[string]bool) (int, error)
 	a.mu.Lock()
 	a.snap = snap
 	a.mu.Unlock()
+	a.applyDNSSnapshot(snap)
 	log.Printf("本轮完成：%d/%d 个域名生效，产物已写入 %s", snap.Status.ActiveCount, len(entries), filepath.Dir(a.hostsPath))
 	return d.ScheduleMinutes, nil
 }
@@ -677,6 +706,8 @@ func (a *App) handleDomainsConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		log.Printf("配置已更新: %s（%d 字节）", a.configPath, len(body))
+		// 增删域名后即时刷新 AGH 上游分流行，避免用户已删除的域名仍被分流过来。
+		a.refreshDNSFamiliesFromConfig()
 		// 保存后立即把禁用域名从产物中移除，避免页面显示禁用但订阅仍在生效。
 		disabledNames := make(map[string]bool)
 		for _, d := range parsed.Domains {
@@ -1015,6 +1046,7 @@ func (a *App) handleSwitch(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	a.snap = built
 	a.mu.Unlock()
+	a.applyDNSSnapshot(built)
 	a.appendHistory([]output.Entry{{
 		Name: domain, IP: ip, LatencyMS: chosen.LatencyMS,
 		Validated: 1, Reason: "手动切换", Candidates: candidateCount,
@@ -1185,6 +1217,9 @@ func (a *App) handleDisable(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("已%s %d 个域名（配置已更新）", map[bool]string{true: "禁用", false: "启用"}[req.Disabled], changed)
 
+	// 家族清单必须即时跟随：禁用后若仍留在 AGH 上游行里，AGH 会把查询送来，
+	// 而我们对该域名答 REFUSED，等于把用户网络解析搞挂。
+	a.refreshDNSFamiliesFromConfig()
 	if req.Disabled {
 		if err := a.removeFromSnapshot(affected); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
@@ -1225,6 +1260,7 @@ func (a *App) removeFromSnapshot(names map[string]bool) error {
 	a.mu.Lock()
 	a.snap = built
 	a.mu.Unlock()
+	a.applyDNSSnapshot(built)
 	return nil
 }
 
