@@ -1473,6 +1473,16 @@ tr.domain-row td:nth-child(2){padding-left:32px}
   h1{font-size:24px}
   table{font-size:13px}
   th,td{padding:9px 7px}
+  /* 窄屏下隐藏「节点」列，优先保证域名/IP/状态/操作可读 */
+  th:nth-child(6),td:nth-child(6){display:none}
+  /* 操作列按钮在窄屏改为两列网格，避免一行挤成竖条 */
+  td.cell-ops{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+  td.cell-ops .badge{grid-column:1/-1;max-width:100%}
+  /* 域名列表工具栏改为纵向堆叠 */
+  .table-tools{flex-direction:column;align-items:stretch}
+  .table-tools .left{flex-wrap:wrap}
+  .group-head{flex-direction:column;align-items:stretch}
+  .group-actions{justify-content:flex-start}
   .truncate{max-width:150px}
   .card{padding:14px}
   #discoverInput{flex:1 1 100%}
@@ -1861,6 +1871,7 @@ a.about-value:hover{text-decoration:underline}
     <li>兼容：也可在 AdGuard Home「过滤器 → DNS 重写清单」添加订阅地址 <code>http://&lt;NAS内网IP&gt;:18088/agh.txt</code>，更新间隔设为 1 小时。<strong>与上一种方式二选一，不要同时启用。</strong></li>
     <li>需要立即更新时，展开域名分组后勾选并点「刷新选中」；只想重写订阅文件时点「刷新 AGH 规则」。</li>
     <li>点击延迟数值可查看全部候选 IP 并手动切换；状态表支持按主域名分组以及启用/禁用域名。</li>
+    <li>所有配置项（轮询、探测 DNS、滞回、子域名展开、DNS 应答器、产物与校验）都在「编辑域名清单」的图形化表单内，单域名的高级项点该行「高级」展开；需要时也可切到「JSON 源码」。</li>
     <li>其他端点：<code>/hosts.txt</code>（hosts 语法）、<code>/status.json</code>（运行状态与统计）、<code>/api/dns</code>（应答器状态与分流规则）。</li>
   </ol>
 </div>
