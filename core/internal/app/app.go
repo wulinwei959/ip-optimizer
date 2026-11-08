@@ -19,10 +19,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"hosts-optimizer/internal/config"
 	"hosts-optimizer/internal/dnsquery"
+	"hosts-optimizer/internal/dnsserver"
 	"hosts-optimizer/internal/expand"
 	"hosts-optimizer/internal/history"
 	"hosts-optimizer/internal/logbuf"
@@ -47,6 +49,12 @@ type App struct {
 	snap         *output.Snapshot
 	roundMu      sync.Mutex
 	lastSchedule int
+
+	// DNS 应答器（AdGuard Home 上游分流模式）
+	dnsSrv      *dnsserver.Server // listen 为空时为 nil（禁用）
+	dnsListen   string
+	dnsTTL      atomic.Int64
+	dnsFamilies []string // 启用域名的完整名，生成 AGH 上游行用
 
 	// 异步刷新任务
 	refreshMu   sync.Mutex
@@ -107,6 +115,8 @@ func New(rt *config.Runtime, version string) (*App, error) {
 		version:      version,
 		lastSchedule: rt.Config.Defaults.ScheduleMinutes,
 	}
+	// 必须先于 recoverSnapshot：恢复流程会刷新应答视图。
+	a.initDNSServer(rt)
 	a.recoverSnapshot()
 	return a, nil
 }
@@ -139,6 +149,14 @@ func buildRootCAs(path string) (*x509.CertPool, error) {
 
 // recoverSnapshot 让服务重启后立刻能对外提供上一轮订阅内容，不必等首轮探测结束。
 func (a *App) recoverSnapshot() {
+	// 先恢复 status.json：即便 hosts.txt / agh.txt 缺失，应答器也能立即服务，
+	// 否则重启后到首轮探测完成前，分流域名会全部 REFUSED，等于自己断网几十秒。
+	if b, err := os.ReadFile(a.statusPath); err == nil {
+		var st output.Status
+		if json.Unmarshal(b, &st) == nil {
+			a.applyDNSSnapshot(&output.Snapshot{Status: st})
+		}
+	}
 	hosts, err1 := os.ReadFile(a.hostsPath)
 	agh, err2 := os.ReadFile(a.aghPath)
 	if err1 != nil || err2 != nil {
@@ -158,6 +176,7 @@ func (a *App) recoverSnapshot() {
 	a.mu.Lock()
 	a.snap = snap
 	a.mu.Unlock()
+	a.applyDNSSnapshot(snap)
 	log.Printf("已从磁盘恢复上一轮产物")
 }
 
@@ -166,17 +185,23 @@ func (a *App) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", a.handle)
 	mux.HandleFunc("/api/refresh-status", a.handleRefreshStatus)
+	mux.HandleFunc("/api/dns", a.handleDNSStats)
 	srv := &http.Server{
 		Addr: ":" + a.port, Handler: mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	errCh := make(chan error, 1)
+	// 容量 2：HTTP 与 DNS 应答器两个生产者，避免任一方的错误阻塞导致 goroutine 泄漏。
+	errCh := make(chan error, 2)
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
 	log.Printf("HTTP 服务已启动，监听 :%s", a.port)
+	// DNS 监听失败属致命错误：返回后进程退出，由 init 系统的 Restart=always 拉起。
+	if a.dnsSrv != nil {
+		go func() { errCh <- a.dnsSrv.Serve(ctx) }()
+	}
 
 	for {
 		select {
@@ -223,6 +248,9 @@ func (a *App) doRoundFor(ctx context.Context, only map[string]bool) (int, error)
 	}
 	a.lastSchedule = rt.Config.Defaults.ScheduleMinutes
 	d := rt.Config.Defaults
+	// DNS 应答器的 TTL 与分流域名清单每轮跟随配置，改完 domains.json 下一轮生效。
+	a.dnsTTL.Store(int64(d.DNS.TTL))
+	a.updateDNSFamilies(rt.Config.Domains)
 	timeout := time.Duration(d.TimeoutSeconds) * time.Second
 	started := time.Now()
 
@@ -332,6 +360,7 @@ func (a *App) doRoundFor(ctx context.Context, only map[string]bool) (int, error)
 	a.mu.Lock()
 	a.snap = snap
 	a.mu.Unlock()
+	a.applyDNSSnapshot(snap)
 	log.Printf("本轮完成：%d/%d 个域名生效，产物已写入 %s", snap.Status.ActiveCount, len(entries), filepath.Dir(a.hostsPath))
 	return d.ScheduleMinutes, nil
 }
@@ -677,6 +706,8 @@ func (a *App) handleDomainsConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		log.Printf("配置已更新: %s（%d 字节）", a.configPath, len(body))
+		// 增删域名后即时刷新 AGH 上游分流行，避免用户已删除的域名仍被分流过来。
+		a.refreshDNSFamiliesFromConfig()
 		// 保存后立即把禁用域名从产物中移除，避免页面显示禁用但订阅仍在生效。
 		disabledNames := make(map[string]bool)
 		for _, d := range parsed.Domains {
@@ -1015,6 +1046,7 @@ func (a *App) handleSwitch(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	a.snap = built
 	a.mu.Unlock()
+	a.applyDNSSnapshot(built)
 	a.appendHistory([]output.Entry{{
 		Name: domain, IP: ip, LatencyMS: chosen.LatencyMS,
 		Validated: 1, Reason: "手动切换", Candidates: candidateCount,
@@ -1185,6 +1217,9 @@ func (a *App) handleDisable(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("已%s %d 个域名（配置已更新）", map[bool]string{true: "禁用", false: "启用"}[req.Disabled], changed)
 
+	// 家族清单必须即时跟随：禁用后若仍留在 AGH 上游行里，AGH 会把查询送来，
+	// 而我们对该域名答 REFUSED，等于把用户网络解析搞挂。
+	a.refreshDNSFamiliesFromConfig()
 	if req.Disabled {
 		if err := a.removeFromSnapshot(affected); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
@@ -1225,6 +1260,7 @@ func (a *App) removeFromSnapshot(names map[string]bool) error {
 	a.mu.Lock()
 	a.snap = built
 	a.mu.Unlock()
+	a.applyDNSSnapshot(built)
 	return nil
 }
 
@@ -1265,8 +1301,12 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);max-width:11
 h1{font-size:26px;font-weight:700;letter-spacing:-.01em;margin:0 0 4px;line-height:1.25}
 .sub{color:var(--muted);font-size:13px;margin:0;line-height:1.5;font-variant-numeric:tabular-nums}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px;margin:16px 0;box-shadow:0 1px 2px rgba(16,24,40,.04)}
-table{border-collapse:collapse;width:100%;font-size:14px;font-variant-numeric:tabular-nums}
-th,td{border-bottom:1px solid var(--line);padding:12px;text-align:left;vertical-align:middle}
+/* 表格必须 fixed 布局：table-cell 的 max-width 会被浏览器忽略，
+   长域名会把整列顶宽并与邻列文字重叠。fixed 下 th 的 width 才会真正生效。 */
+table{border-collapse:collapse;width:100%;font-size:14px;font-variant-numeric:tabular-nums;table-layout:fixed}
+th,td{border-bottom:1px solid var(--line);padding:12px;text-align:left;vertical-align:middle;min-width:0}
+th{overflow-wrap:anywhere}
+td{overflow-wrap:anywhere;line-break:anywhere}
 th{background:#f8fafc;font-weight:600;color:#4b5563;white-space:nowrap;font-size:12.5px;letter-spacing:.04em}
 tbody tr:hover{background:#f9fafb}
 tbody td:nth-child(2),tbody td:nth-child(3){font-family:var(--mono);font-size:13.5px}
@@ -1299,6 +1339,19 @@ summary::marker{color:var(--accent)}
 .status-ok{background:var(--ok);box-shadow:0 0 6px rgba(22,163,74,.5)}
 .status-fail{background:#ef4444;box-shadow:0 0 6px rgba(239,68,68,.5)}
 .status-unknown{background:#9ca3af}
+/* 域名/IP 列：等宽字体 + 超出省略。table-layout:fixed 下宽度由 th 决定，
+   这里只负责截断显示，title 属性保留完整内容供悬停查看。 */
+td.truncate{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block;font-family:var(--mono)}
+/* 域名 / IP 列：单元格自身不截断，交给内部 span 省略，
+   这样长域名不会把邻列顶开造成文字重叠。 */
+td.cell-name,td.cell-ip{max-width:100%;overflow:hidden;font-family:var(--mono);font-size:13px}
+td.cell-name .truncate,td.cell-ip .truncate{display:inline-block;max-width:100%;vertical-align:middle}
+/* 操作列：按钮可换行，长域名行不会把操作列顶宽 */
+td.cell-ops{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+/* badge 放在 flex 操作列内：flex 子项默认 min-width:auto 会把长中文撑破列宽，
+   必须显式 min-width:0 才会按 max-width + ellipsis 截断。
+   同时给 badge 一个收缩上限，保证它不会把同行按钮挤出单元格。 */
+td.cell-ops .badge{flex:0 1 auto;min-width:0;max-width:8em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-left:0;vertical-align:middle}
 .truncate{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:middle}
 .badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;background:#eff6ff;color:#1d4ed8;margin-left:6px;white-space:nowrap}
 .badge-ct{background:#fff7ed;color:#c2410c}
@@ -1343,7 +1396,14 @@ summary::marker{color:var(--accent)}
 .cfg-section[open]>summary{border-bottom:1px solid var(--line);background:var(--surface-2)}
 .cfg-body{padding:12px 14px 14px}
 .field-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
-.field-grid label{display:flex;flex-direction:column;gap:5px;font-size:13px;color:#4b5563}
+/* label 作为整块可点击区：内部文字与输入框都要能收缩，
+   否则长中文标签会把 input 挤出网格列造成溢出。 */
+.field-grid label{display:flex;flex-direction:column;gap:5px;font-size:13px;color:#4b5563;min-width:0;cursor:pointer}
+.field-grid label>input{min-width:0;width:100%}
+.cfg-body>label{display:flex;flex-direction:column;gap:5px;min-width:0;font-size:13px;color:#4b5563;cursor:pointer}
+.cfg-body>label>input{min-width:0;width:100%}
+.domain-adv label.adv-check{flex-direction:row;align-items:center;gap:8px;flex-wrap:nowrap}
+.domain-adv label.adv-check input{width:15px;height:15px;flex:0 0 auto;accent-color:var(--accent)}
 .field-grid label.wide{grid-column:1/-1}
 .field-grid input[type=text],.field-grid input[type=number]{width:100%}
 .checks{display:flex;flex-wrap:wrap;gap:14px;padding:6px 0}
@@ -1390,7 +1450,13 @@ summary::marker{color:var(--accent)}
 .table-row-hidden{display:none}
 .group-row td{background:#f7f9fc;padding:0}
 .group-row.open td{background:#eff4fb}
-.group-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 12px}
+.group-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 12px;flex-wrap:wrap;min-width:0}
+/* 分组标题本身是 button（inline-flex 容器），省略要作用在内部的 .group-name 上。
+   关键是给 button 一个可收缩基准，否则长主域名会把整行撑开。 */
+.group-toggle{flex:1 1 120px;min-width:0;max-width:100%}
+.group-toggle .group-name{flex:0 1 auto;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+.group-toggle .group-count,.group-toggle .group-ok{flex:0 0 auto;white-space:nowrap}
+.group-actions{display:flex;align-items:center;gap:14px;flex:0 0 auto;flex-wrap:wrap}
 .group-toggle{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid transparent;border-radius:8px;background:transparent;font-size:14px;font-weight:600;color:#111827}
 .group-toggle:hover{background:#e8eef8;border-color:#d5deec}
 .group-toggle .caret{width:14px;color:var(--accent);font-size:11px;text-align:center}
@@ -1407,6 +1473,16 @@ tr.domain-row td:nth-child(2){padding-left:32px}
   h1{font-size:24px}
   table{font-size:13px}
   th,td{padding:9px 7px}
+  /* 窄屏下隐藏「节点」列，优先保证域名/IP/状态/操作可读 */
+  th:nth-child(6),td:nth-child(6){display:none}
+  /* 操作列按钮在窄屏改为两列网格，避免一行挤成竖条 */
+  td.cell-ops{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+  td.cell-ops .badge{grid-column:1/-1;max-width:100%}
+  /* 域名列表工具栏改为纵向堆叠 */
+  .table-tools{flex-direction:column;align-items:stretch}
+  .table-tools .left{flex-wrap:wrap}
+  .group-head{flex-direction:column;align-items:stretch}
+  .group-actions{justify-content:flex-start}
   .truncate{max-width:150px}
   .card{padding:14px}
   #discoverInput{flex:1 1 100%}
@@ -1454,6 +1530,9 @@ tr.domain-row td:nth-child(2){padding-left:32px}
 :root[data-theme="dark"] .group-toggle:hover{background:#232b35;border-color:#3a4453}
 :root[data-theme="dark"] .group-ok.has-bad{color:#fbbf24}
 :root[data-theme="dark"] tr.domain-row td{background:var(--card)}
+/* 分流行可能是 50+ 个域名，readonly input 会被截断且难以全选，
+   改用 pre 允许整段换行显示，复制时用 Range 选中全部文本。 */
+.agh-line{margin:10px 0 0;padding:10px 12px;background:var(--surface-2,#f8fafc);border:1px solid var(--line);border-radius:8px;font-family:var(--mono);font-size:12.5px;line-height:1.6;white-space:pre-wrap;word-break:break-all;color:var(--text);max-height:140px;overflow:auto}
 .log-tools{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:10px 0}
 .log-tools label{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);cursor:pointer;white-space:nowrap}
 .log-tools input[type=checkbox]{width:15px;height:15px;accent-color:var(--accent);margin:0}
@@ -1568,16 +1647,16 @@ a.about-value:hover{text-decoration:underline}
 </div>
 
 <div id="cfgForm" class="cfg-form active">
-  <details class="cfg-section">
+  <details class="cfg-section" open>
     <summary>定时与探测</summary>
     <div class="cfg-body">
       <div class="field-grid">
-        <label>轮询周期（分钟）<input id="fSchedule" type="number" min="1"></label>
+        <label>轮询周期（分钟）<input id="fSchedule" type="number" min="1" max="1440"></label>
         <label>探测端口<input id="fPort" type="number" min="1" max="65535"></label>
-        <label>并发数<input id="fConcurrency" type="number" min="1"></label>
+        <label>并发数<input id="fConcurrency" type="number" min="1" max="256"></label>
         <label>最大候选 IP 数<input id="fMaxCandidates" type="number" min="1"></label>
         <label>TCP 探测轮数<input id="fTCPRounds" type="number" min="1"></label>
-        <label>单次超时（秒）<input id="fTimeout" type="number" min="1"></label>
+        <label>单次超时（秒）<input id="fTimeout" type="number" min="1" max="60"></label>
       </div>
     </div>
   </details>
@@ -1586,10 +1665,37 @@ a.about-value:hover{text-decoration:underline}
     <div class="cfg-body">
       <div class="field-grid">
         <label class="wide">探测 DNS（逗号分隔）<input id="fProbeDNS" type="text" placeholder="223.5.5.5, tls://dns.alidns.com, https://dns.cloudflare.com/dns-query"></label>
-        <label>滞回百分比（%）<input id="fHystPct" type="number" min="0"></label>
-        <label>滞回轮数<input id="fHystRounds" type="number" min="1"></label>
+        <label>滞回百分比（%）<input id="fHystPct" type="number" min="0" max="100"></label>
+        <label>滞回轮数<input id="fHystRounds" type="number" min="1" max="100"></label>
       </div>
       <p class="hint" style="margin:8px 0 0">支持 UDP（字面 IP）、DoT（tls://主机[:853]）、DoH（https://主机/路径），可混用；DoQ 暂不支持。</p>
+    </div>
+  </details>
+  <details class="cfg-section">
+    <summary>DNS 应答器（供 AdGuard Home 上游分流）</summary>
+    <div class="cfg-body">
+      <div class="field-grid">
+        <label class="wide">监听地址（host:port）<input id="fDNSListen" type="text" placeholder="127.0.0.1:18053；填 off 表示禁用"></label>
+        <label>应答 TTL（秒）<input id="fDNSTTL" type="number" min="5" max="3600"></label>
+      </div>
+      <p class="hint" style="margin:8px 0 0">留空使用默认值 127.0.0.1:18053 与 60 秒。地址必须是 IP 字面量（留空 host 表示监听全部接口，需自行加防火墙）；填 off / disabled / none / 0 / false 可禁用。修改后下一轮探测生效，页面「DNS 应答服务」卡片会显示当前值与分流规则。</p>
+      <p class="hint" style="margin:8px 0 0"><strong>注意</strong>：与 AdGuard Home 的过滤器订阅二选一，不要同时启用。</p>
+    </div>
+  </details>
+  <details class="cfg-section">
+    <summary>产物与校验</summary>
+    <div class="cfg-body">
+      <label class="wide">HTTP 状态码白名单（逗号分隔，留空不校验）
+        <input id="fExpectStatus" type="text" placeholder="如 200,301,302,403">
+      </label>
+      <label class="wide">生成的产物
+        <span class="checks">
+          <label><input type="checkbox" id="fOutHosts" value="hosts.txt"> hosts.txt</label>
+          <label><input type="checkbox" id="fOutAGH" value="agh.txt"> agh.txt</label>
+          <label><input type="checkbox" id="fOutStatus" value="status.json"> status.json</label>
+        </span>
+      </label>
+      <p class="hint" style="margin:8px 0 0">HTTP 状态码白名单默认不校验：多数站点根路径返回 403/404，开启后可能误杀可用 IP；outputs 为保留字段，三项产物当前固定生成。</p>
     </div>
   </details>
   <details class="cfg-section">
@@ -1603,9 +1709,9 @@ a.about-value:hover{text-decoration:underline}
             <label><input type="checkbox" id="fSrcRules" value="rules"> 规则</label>
           </span>
         </label>
-        <label>展开并发<input id="fExpandConcurrency" type="number" min="1"></label>
-        <label>展开超时（秒）<input id="fExpandTimeout" type="number" min="1"></label>
-        <label>最多子域名<input id="fExpandMax" type="number" min="1"></label>
+        <label>展开并发<input id="fExpandConcurrency" type="number" min="1" max="256"></label>
+        <label>展开超时（秒）<input id="fExpandTimeout" type="number" min="1" max="60"></label>
+        <label>最多子域名<input id="fExpandMax" type="number" min="1" max="1000"></label>
       </div>
     </div>
   </details>
@@ -1660,19 +1766,19 @@ a.about-value:hover{text-decoration:underline}
 <table><thead>
 <tr>
   <th class="select-cell"><input type="checkbox" id="selectAll" title="全选筛选结果"></th>
-  <th style="width:20%">域名</th>
-  <th style="width:16%">优选 IP</th>
+  <th style="width:24%">域名</th>
+  <th style="width:14%">优选 IP</th>
   <th style="width:8%">延迟</th>
   <th style="width:12%">连接状态</th>
-  <th style="width:10%">节点</th>
-  <th style="width:34%">操作</th>
+  <th style="width:8%">节点</th>
+  <th style="width:26%">操作</th>
 </tr>
 </thead><tbody>
 {{range $i, $d := .Domains}}
 <tr data-name="{{$d.Name}}" data-ip="{{$d.IP}}" data-reason="{{$d.Reason}}" data-status="{{$d.Validated}}" data-pending="{{$d.Pending}}" data-disabled="{{$d.Disabled}}">
   <td class="select-cell"><input type="checkbox" class="row-check" value="{{$d.Name}}"></td>
-  <td class="truncate" title="{{$d.Name}}">{{$d.Name}}</td>
-  <td class="truncate" title="{{$d.IP}}">{{$d.IP}}</td>
+  <td class="cell-name" title="{{$d.Name}}"><span class="truncate">{{$d.Name}}</span></td>
+  <td class="cell-ip" title="{{$d.IP}}"><span class="truncate">{{$d.IP}}</span></td>
   <td>{{if $d.IP}}<button type="button" class="latency-btn" data-domain="{{$d.Name}}" title="查看全部候选 IP">{{$d.LatencyMS}} ms</button>{{else}}—{{end}}</td>
   <td>
     {{if $d.Disabled}}
@@ -1687,16 +1793,29 @@ a.about-value:hover{text-decoration:underline}
     {{end}}
   </td>
   <td>{{$d.Candidates}}/{{$d.Validated}}</td>
-  <td>
+  <td class="cell-ops">
     <button type="button" class="expand-btn" data-domain="{{$d.Name}}">展开域名</button>
     <button type="button" class="refresh-btn" data-domain="{{$d.Name}}" title="单独刷新该域名">刷新</button>
     <button type="button" class="disable-btn" data-domain="{{$d.Name}}" data-disabled="{{$d.Disabled}}">{{if $d.Disabled}}启用{{else}}禁用{{end}}</button>
-    <span class="badge">{{$d.Reason}}</span>
+    {{if $d.Reason}}<span class="badge" title="{{$d.Reason}}">{{$d.Reason}}</span>{{end}}
   </td>
 </tr>
 {{end}}
 </tbody></table>
 
+</details>
+</div>
+
+<div class="card">
+<details id="dnsDetails" open>
+<summary>DNS 应答服务（推荐）</summary>
+<div class="bar">
+  <button id="copyAgh" type="button">复制分流规则</button>
+  <span id="dnsStats"></span>
+</div>
+<pre id="aghLine" class="agh-line" spellcheck="false"></pre>
+<p class="hint">把上面这行粘贴到 AdGuard Home「设置 → DNS 设置 → 上游 DNS 服务器」末尾。这样 AGH 只把这些域名送到本服务，其余域名与广告过滤不受影响。<strong>该模式与上方的「DNS 重写清单」订阅二选一</strong>，不要同时启用。</p>
+<p class="hint">IP 切换后最多一个 TTL（当前 {{.DNSTTL}} 秒）即可生效，不必等订阅刷新。默认只监听本机回环地址，与 AdGuard Home 同机部署时最安全。</p>
 </details>
 </div>
 
@@ -1748,13 +1867,15 @@ a.about-value:hover{text-decoration:underline}
   <h4>使用说明</h4>
   <ol class="about-steps">
     <li>在「编辑域名清单」中添加域名，或输入主域名后勾选相关子域名批量添加，最后点「保存并生效」。</li>
-    <li>在 AdGuard Home 打开「过滤器 → DNS 重写清单」，添加订阅地址 <code>http://&lt;NAS内网IP&gt;:18088/agh.txt</code>，更新间隔设为 1 小时。</li>
+    <li>推荐：展开「DNS 应答服务」卡片，复制分流规则，粘贴到 AdGuard Home「设置 → DNS 设置 → 上游 DNS 服务器」末尾。IP 切换后最多一个 TTL 即生效。</li>
+    <li>兼容：也可在 AdGuard Home「过滤器 → DNS 重写清单」添加订阅地址 <code>http://&lt;NAS内网IP&gt;:18088/agh.txt</code>，更新间隔设为 1 小时。<strong>与上一种方式二选一，不要同时启用。</strong></li>
     <li>需要立即更新时，展开域名分组后勾选并点「刷新选中」；只想重写订阅文件时点「刷新 AGH 规则」。</li>
     <li>点击延迟数值可查看全部候选 IP 并手动切换；状态表支持按主域名分组以及启用/禁用域名。</li>
-    <li>其他端点：<code>/hosts.txt</code>（hosts 语法）、<code>/status.json</code>（运行状态与统计）。</li>
+    <li>所有配置项（轮询、探测 DNS、滞回、子域名展开、DNS 应答器、产物与校验）都在「编辑域名清单」的图形化表单内，单域名的高级项点该行「高级」展开；需要时也可切到「JSON 源码」。</li>
+    <li>其他端点：<code>/hosts.txt</code>（hosts 语法）、<code>/status.json</code>（运行状态与统计）、<code>/api/dns</code>（应答器状态与分流规则）。</li>
   </ol>
 </div>
-<div class="about-foot">管理接口无登录鉴权，请仅在内网使用；刷新任务状态保存在进程内存，重启后重新触发即可。</div>
+<div class="about-foot">管理接口与 DNS 应答器均无登录鉴权，请仅在内网使用；DNS 应答器默认只监听本机回环地址，如需对外监听请自行添加防火墙规则。刷新任务状态保存在进程内存，重启后重新触发即可。</div>
 </details>
 </div>
 
@@ -1806,6 +1927,61 @@ a.about-value:hover{text-decoration:underline}
   };
   if (scheme.addEventListener) scheme.addEventListener("change", onSchemeChange);
   else if (scheme.addListener) scheme.addListener(onSchemeChange);
+
+  // DNS 应答服务卡片：拉取运行状态并填充分流规则与计数。
+  (function () {
+    var aghLine = document.getElementById("aghLine");
+    var copyAgh = document.getElementById("copyAgh");
+    var dnsStats = document.getElementById("dnsStats");
+    function fmtTime(s) {
+      if (!s) return "暂无查询";
+      return String(s).replace("T", " ").split(/[+Z]/)[0];
+    }
+    function loadDNS() {
+      fetch("/api/dns")
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          if (!j.ok) return;
+          if (!j.enabled) {
+            aghLine.textContent = "";
+            copyAgh.disabled = true;
+            dnsStats.textContent = j.hint || "未启用";
+            return;
+          }
+          aghLine.textContent = j.agh_upstream || "";
+          copyAgh.disabled = !j.agh_upstream;
+          dnsStats.textContent = "查询 " + j.queries + " · 应答 " + j.answered +
+            " · NODATA " + j.nodata + " · 拒绝 " + j.refused +
+            " · 畸形 " + j.malformed + " · TTL " + j.ttl + "s" +
+            " · 最近 " + fmtTime(j.last_query_at);
+        })
+        .catch(function () {});
+    }
+    copyAgh.onclick = function () {
+      var text = aghLine.textContent || "";
+      if (!text) return;
+      // pre 元素不能用 select()；用 Range 选中全部文本后交给剪贴板 API。
+      var range = document.createRange();
+      range.selectNodeContents(aghLine);
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      var copied = false;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text);
+          copied = true;
+        }
+      } catch (e) { copied = false; }
+      if (!copied) {
+        try { copied = document.execCommand("copy"); } catch (e) { copied = false; }
+      }
+      sel.removeAllRanges();
+      dnsStats.textContent = copied ? "分流规则已复制" : "复制失败，请手动选择上方文本复制";
+    };
+    loadDNS();
+    setInterval(loadDNS, 5000);
+  })();
 
   inp.value = location.origin + "/agh.txt";
   document.getElementById("copy").onclick = function () {
@@ -1915,6 +2091,18 @@ a.about-value:hover{text-decoration:underline}
     label.appendChild(input);
     return label;
   }
+  // 布尔型高级项：勾选框比文本输入 true/false 更不易出错
+  function advCheck(labelText, cls, checked) {
+    var label = document.createElement("label");
+    label.className = "adv-check";
+    var input = document.createElement("input");
+    input.type = "checkbox";
+    input.className = cls;
+    input.checked = !!checked;
+    label.appendChild(input);
+    label.appendChild(document.createTextNode(" " + labelText));
+    return label;
+  }
   function buildDomainRow(d) {
     var item = document.createElement("div");
     item.className = "domain-item";
@@ -1968,6 +2156,10 @@ a.about-value:hover{text-decoration:underline}
     adv.appendChild(advField("端口（留空用默认）", "d-port", d.port ? String(d.port) : "", "number"));
     adv.appendChild(advField("候选 IP（逗号分隔）", "d-cands", (d.candidates || []).join(", ")));
     adv.appendChild(advField("展开来源（ct/wordlist/rules）", "d-sources", (d.expand_sources || []).join(", ")));
+    adv.appendChild(advField("HTTP 状态码白名单", "d-expect", (d.expect_status || []).join(", ")));
+    // 三个布尔项做成勾选框，避免用户手拼 true/false
+    adv.appendChild(advCheck("允许私网 IP", "d-private", !!d.allow_private));
+    adv.appendChild(advCheck("抑制 AAAA 记录", "d-noaaaa", d.suppress_aaaa !== false));
 
     item.appendChild(main);
     item.appendChild(adv);
@@ -2000,6 +2192,17 @@ a.about-value:hover{text-decoration:underline}
     document.getElementById("fSrcCT").checked = srcs.indexOf("ct") >= 0;
     document.getElementById("fSrcWL").checked = srcs.indexOf("wordlist") >= 0;
     document.getElementById("fSrcRules").checked = srcs.indexOf("rules") >= 0;
+    // DNS 应答器：空值回落默认，off 类词表原样回显便于识别
+    var dns = d.dns || {};
+    document.getElementById("fDNSListen").value = dns.listen || "";
+    numTo(document.getElementById("fDNSTTL"), dns.ttl, 60);
+    // 产物与校验
+    var outs = (d.outputs && d.outputs.length) ? d.outputs : ["hosts.txt", "agh.txt", "status.json"];
+    document.getElementById("fOutHosts").checked = outs.indexOf("hosts.txt") >= 0;
+    document.getElementById("fOutAGH").checked = outs.indexOf("agh.txt") >= 0;
+    document.getElementById("fOutStatus").checked = outs.indexOf("status.json") >= 0;
+    var es = (d.expect_status && d.expect_status.length) ? d.expect_status : [];
+    document.getElementById("fExpectStatus").value = es.join(", ");
 
     domainEditor.innerHTML = "";
     var list = Array.isArray(obj.domains) ? obj.domains : [];
@@ -2046,6 +2249,32 @@ a.about-value:hover{text-decoration:underline}
     if (document.getElementById("fSrcRules").checked) srcs.push("rules");
     d.expand_sources = srcs.length ? srcs : ["wordlist", "rules"];
 
+    // DNS 应答器：空串不写入（沿用磁盘值），off 类词表照写，其余校验 host:port
+    var listenVal = document.getElementById("fDNSListen").value.trim();
+    var offWords = { off: 1, disabled: 1, none: 1, "0": 1, "false": 1 };
+    if (listenVal === "") {
+      delete d.dns;
+    } else {
+      if (!d.dns) d.dns = {};
+      if (offWords[listenVal.toLowerCase()]) {
+        d.dns.listen = listenVal.toLowerCase();
+      } else {
+        d.dns.listen = listenVal;
+      }
+      setNum(d.dns, "ttl", document.getElementById("fDNSTTL"), 60);
+    }
+
+    // 产物与校验
+    var outs = [];
+    if (document.getElementById("fOutHosts").checked) outs.push("hosts.txt");
+    if (document.getElementById("fOutAGH").checked) outs.push("agh.txt");
+    if (document.getElementById("fOutStatus").checked) outs.push("status.json");
+    if (outs.length) d.outputs = outs;
+    var esCodes = splitList(document.getElementById("fExpectStatus").value)
+      .map(function (s) { return parseInt(s, 10); })
+      .filter(function (n) { return !isNaN(n) && n >= 100 && n <= 599; });
+    if (esCodes.length) d.expect_status = esCodes;
+
     var domains = [];
     Array.prototype.forEach.call(domainEditor.querySelectorAll(".domain-item"), function (item) {
       var src = item._src || {};
@@ -2073,6 +2302,15 @@ a.about-value:hover{text-decoration:underline}
       if (cands.length) base.candidates = cands; else delete base.candidates;
       var es = splitList(item.querySelector(".d-sources").value);
       if (es.length) base.expand_sources = es; else delete base.expand_sources;
+      var exp = splitList(item.querySelector(".d-expect").value)
+        .map(function (s) { return parseInt(s, 10); })
+        .filter(function (n) { return !isNaN(n) && n >= 100 && n <= 599; });
+      if (exp.length) base.expect_status = exp; else delete base.expect_status;
+      if (item.querySelector(".d-private").checked) base.allow_private = true;
+      else delete base.allow_private;
+      // suppress_aaaa 默认 true：仅当用户显式取消勾选时才写入 false
+      if (item.querySelector(".d-noaaaa").checked) delete base.suppress_aaaa;
+      else base.suppress_aaaa = false;
       domains.push(base);
     });
     obj.domains = domains;
@@ -2414,6 +2652,8 @@ a.about-value:hover{text-decoration:underline}
       var groupName = document.createElement("span");
       groupName.className = "group-name";
       groupName.textContent = g.base;
+      // 主域名被省略时，悬停可看完整名称
+      toggle.title = g.base;
       var count = document.createElement("span");
       count.className = "group-count";
       var ok = document.createElement("span");
@@ -2437,9 +2677,14 @@ a.about-value:hover{text-decoration:underline}
       disableLabel.appendChild(groupDisable);
       disableLabel.appendChild(document.createTextNode(" 禁用本组"));
 
+      // 右侧操作区独立成组：长主域名时标题省略，勾选/禁用换行而不是重叠
+      var actions = document.createElement("div");
+      actions.className = "group-actions";
+      actions.appendChild(selectLabel);
+      actions.appendChild(disableLabel);
+
       wrap.appendChild(toggle);
-      wrap.appendChild(selectLabel);
-      wrap.appendChild(disableLabel);
+      wrap.appendChild(actions);
       cell.appendChild(wrap);
       head.appendChild(cell);
       tbody.appendChild(head);
@@ -3104,7 +3349,7 @@ a.about-value:hover{text-decoration:underline}
         var records = j.records || [];
         renderTrend(records, days);
         renderHistoryRows(records);
-        historyState.textContent = "共 " + records.length + " 条记录";
+        historyState.textContent = records.length ? ("共 " + records.length + " 条记录") : "该时间范围内暂无记录";
       })
       .catch(function (e) { historyState.textContent = "加载失败: " + e; });
   }
@@ -3193,6 +3438,7 @@ func (a *App) index(w http.ResponseWriter, r *http.Request) {
 		Domains         []domainView
 		Version         string
 		ProjectURL      string
+		DNSTTL          int
 	}{
 		GeneratedAt:     snap.Status.GeneratedAt.Format(time.RFC3339),
 		ScheduleMinutes: snap.Status.ScheduleMinutes,
@@ -3202,6 +3448,7 @@ func (a *App) index(w http.ResponseWriter, r *http.Request) {
 		Domains:         views,
 		Version:         a.version,
 		ProjectURL:      "https://github.com/wulinwei959/ip-optimizer",
+		DNSTTL:          int(a.dnsTTL.Load()),
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := indexTmpl.Execute(w, data); err != nil {

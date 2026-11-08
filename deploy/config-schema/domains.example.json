@@ -1,5 +1,5 @@
 {
-  "_readme": "手动新增域名：在 domains 数组中追加对象即可；保存后下一轮自动生成，也可 POST /refresh 即时刷新。本文件为 JSON，不支持注释，字段说明见 deploy/config-schema/README.md",
+  "_readme": "手动新增域名：在 domains 数组中追加对象即可；保存后下一轮自动生成，也可 POST /refresh 即时刷新。要让 IP 切换在一个 TTL 内生效，把 defaults.dns.listen 对应的分流规则粘到 AdGuard Home「上游 DNS 服务器」（与过滤器订阅二选一）。本文件为 JSON，不支持注释，字段说明见 deploy/config-schema/README.md",
   "domains": [
     { "name": "github.com" },
     {
@@ -33,6 +33,10 @@
     "expand_timeout_seconds": 10,
     "expand_max_subdomains": 50,
     "expand_sources": ["wordlist", "rules"],
-    "history_retention_months": 12
+    "history_retention_months": 12,
+    "dns": {
+      "listen": "127.0.0.1:18053",
+      "ttl": 60
+    }
   }
 }

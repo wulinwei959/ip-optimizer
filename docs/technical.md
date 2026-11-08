@@ -1,8 +1,10 @@
 # 技术文档
 
-> 适用版本：1.0.15 · 更新：2026-11-07
+> 适用版本：1.1.0 · 更新：2026-11-08
 >
 > 本文描述内部实现与数据契约；配置字段与部署步骤见 [`deploy/config-schema/README.md`](../deploy/config-schema/README.md) 与 [`deploy/README.md`](../deploy/README.md)。
+
+> 2026-11-08 起新增 DNS 应答器（`internal/dnsserver`），架构、语义矩阵、wire format 与重启恢复见第 13 节。
 
 ## 1. 架构总览
 
@@ -25,6 +27,20 @@
         └─ logbuf → 内存环形日志（2000 行）
 ```
 
+同一进程内还有一条为「IP 切换即时生效」而设的通道：
+
+```
+ 快照更新（轮末 / 手动切换 / 禁用 / 恢复）
+   │
+   ▼
+ applyDNSSnapshot → dnsserver.NewView → atomic.Pointer 原子替换
+   │
+   ▼
+ UDP DNS 应答器（默认 127.0.0.1:18053，TTL 默认 60s）
+   ▲
+   └── AdGuard Home 按域名分流直连：[/github.com/...]127.0.0.1:18053
+ ```
+
 核心只使用 Go 标准库，`CGO_ENABLED=0` 交叉编译为单个静态 ELF；构建脚本强制 `GOPROXY=off`，不引入任何第三方模块。
 
 ## 2. 包结构
@@ -40,6 +56,7 @@
 | `internal/history` | 追加式历史存储：按月 gzip 分片、保留期清理、范围查询；`Store` 接口便于将来换 SQLite |
 | `internal/logbuf` | 线程安全环形日志缓冲，供 `/api/logs` 增量读取 |
 | `internal/expand` | 子域名发现：CT 日志、字典、内置规则 |
+| `internal/dnsserver` | 内置 UDP DNS 应答器：极简报文解析、`View` 父域回退匹配、原子视图替换，供 AGH 上游分流 |
 | `internal/app` | HTTP 路由、探测编排、异步任务、快照管理、管理 API |
 
 ## 3. 一轮探测
@@ -174,7 +191,7 @@ powershell -File deploy/scripts/build-native-fpk.ps1 x86
 
 ## 11. 测试
 
-- 单元测试：`config`、`dnsquery`（含 DoT/DoH）、`probe`、`store`（滞回/候选持久化）、`history`（分片/保留期/过滤）、`app`（合并/定向选择/API）。
+- 单元测试：`config`（含 DNS 应答器默认值/环境变量/校验边界）、`dnsquery`（含 DoT/DoH 与 wire format 交叉验证）、`dnsserver`（语义矩阵、父域回退、视图热替换、nil 安全、畸形不崩溃）、`probe`、`store`（滞回/候选持久化）、`history`（分片/保留期/过滤）、`app`（合并/定向选择/API）。
 - 本地端到端：启动临时配置，验证探测、产物、ETag/304、异步刷新、历史、切换。
 - 真机：fnOS x86 安装/卸载重装、启停、订阅端点、配置保留、1.0.x 功能回归。
 
@@ -184,3 +201,105 @@ powershell -File deploy/scripts/build-native-fpk.ps1 x86
 - **DoQ**：需要第三方 QUIC 库，按零依赖约束不支持。
 - **定向刷新不展开子域名**：只刷新勾选的域名，避免为少量域名触发昂贵的发现流程。
 - **管理接口无鉴权**：仅限内网使用。
+
+## 13. DNS 应答器
+
+### 为什么另开一条路
+
+AdGuard Home 的过滤器订阅刷新间隔最低为 1 小时，且 `$dnsrewrite` 本身是静态替换——`internal/filtering/dnsrewrite.go` 的 `processDNSRewrites` 只把应答记录换成写的 IP，没有 TTL、没有健康度概念。因此走订阅链路时，即使本服务已切到新 IP，客户端仍会在最长一个订阅周期内拿到旧 IP。
+
+内置应答器让 AGH 以「普通上游」的方式按域名分流查询本服务，把生效上限交给 TTL。
+
+### 匹配语义
+
+与 AGH 的 `||domain^` 对齐：先精确匹配，未命中则逐级去掉最左侧标签向上找父域规则（`a.b.c` → `b.c` → `c`）。**不做后缀通配**：`githubusercontent.com` 不会被 `github.com` 规则命中。
+
+`View.Lookup` 在构建时把所有域名规范化为小写无尾点，因此 `GITHUB.COM.` 与 `github.com` 等价。
+
+### 语义矩阵
+
+| 查询 | 应答 |
+| --- | --- |
+| A，命中且 IP 非空 | `NOERROR` + 1 条 A，TTL 取 `dns.ttl` |
+| AAAA，命中 | `NOERROR` + 0 条（NODATA） |
+| 其他 QTYPE，命中 | `NOERROR` + 0 条（只承诺 A/AAAA） |
+| A，命中但 IP 为空 | `REFUSED` |
+| 清单外域名 | `REFUSED` + 限频日志（每 100 条一条） |
+| `QDCOUNT ≠ 1` / name 越界 / label > 63 / 总长 > 255 | `FORMERR`（QDCOUNT 置 0，不回显 question） |
+| 短于 12 字节 | 静默丢弃并计入 `malformed` |
+| `QCLASS ≠ IN` | `REFUSED` |
+| QR=1 或 opcode ≠ QUERY | 静默丢弃 |
+
+### wire format 要点
+
+| 项 | 值 |
+| --- | --- |
+| header | 12 字节：ID(2) flags(2) QD(2) AN(2) NS(2) AR(2) |
+| 应答 flags | `0x8000 \| (q.flags & 0x7800) \| (q.flags & 0x0100) \| rcode`，RA=0 |
+| answer name | 压缩指针 `0xC00C`（指向偏移 12 的 question name） |
+| A RDATA | `net.ParseIP(ip).To4()`，RDLENGTH=4 |
+| EDNS | 查询带 OPT 时**不回显**，合法且 AGH 兼容 |
+| FORMERR 例外 | QDCOUNT 写 0，不回显 question |
+| UDP 读缓冲 | 4096 |
+| 并发模型 | 单 read loop + 每包一 goroutine + `defer recover()` |
+
+### 视图与生命周期
+
+- `Server.view` 是 `atomic.Pointer[View]`，`SetView` 直接 store；查询路径无锁读。
+- `Server.conn` 也必须是 `atomic.Pointer[net.UDPConn]`：`Addr()` 要在 `Serve` 之前（端口 0 场景）和之后都能安全读，普通字段会有数据竞争。
+- 计数全部 `sync/atomic`；`LastQueryAt` 用 `atomic.Int64` 存 UnixNano。
+- `dnsserver.New("")` 返回 `nil` 是设计而非错误，所有公开方法对 nil 接收者安全。
+- `New()` 中 `initDNSServer` 必须**先于** `recoverSnapshot`：恢复流程会调 `applyDNSSnapshot`。
+- `Run()` 中 `errCh` 容量为 2（HTTP 与 DNS 两个生产者）；DNS 监听失败作为致命错误返回，交由 `Restart=always` 拉起。
+
+### 四个快照更新点
+
+任一快照变化后都必须调 `applyDNSSnapshot`，漏一处就会出现「产物已更新但 DNS 仍答旧 IP」：
+
+1. `recoverSnapshot()`——先读 `status.json` 恢复视图，再读 `hosts.txt` / `agh.txt`；
+2. `doRoundFor()` 轮末 `a.snap = snap` 之后；
+3. `handleSwitch()` 手动切换 `a.snap = built` 之后；
+4. `removeFromSnapshot()` 禁用/删除域名 `a.snap = built` 之后。
+
+TTL 与分流域名清单在 `doRoundFor` 加载配置后每轮跟随；此外 `PUT /api/domains` 与 `POST /api/disable` 写回配置后会立即调 `refreshDNSFamiliesFromConfig()`，因为**禁用后若仍留在 AGH 上游行里，AGH 会把查询送来而我们答 REFUSED，等于把用户网络解析搞挂**。
+
+### 分流行格式
+
+```
+[/github.com/raw.githubusercontent.com/]127.0.0.1:18053
+```
+
+方括号内是**启用域名的完整名**而非注册域：`||domain^` 匹配该域名及全部子域，若只列注册域，已独立配置的子域会被父域规则劫持。禁用/删除域名后该行会即时收缩，需重新粘贴到 AGH。
+
+### AGH 配置与持久化
+
+AGH 与本服务同机部署时，可在 AGH「设置 → DNS 设置 → 上游 DNS 服务器」中把分流规则放在普通上游之前，并保留一个普通 DNS 作为未分流域名的兜底：
+
+```
+[/github.com/raw.githubusercontent.com/]127.0.0.1:18053
+223.5.5.5
+```
+
+AGH 提供 `/control/dns_config` 配置接口，可通过 `upstream_dns` 数组热更新上游列表，无需重启 AGH。fnOS 应用中心中的 AGH 可能在升级或重启时用应用模板重新生成运行配置，因此自动化部署除了调用控制接口，还应同步更新以下两处：
+
+- 运行配置：`/vol1/@appdata/AdGuardHome/AdGuardHome.yaml`
+- 应用模板：`/vol1/@appcenter/AdGuardHome/bin/AdGuardHome.yaml`
+
+真机 1.1.0 已验证：经 AGH 查询 `github.com` 与 `raw.githubusercontent.com` 返回本服务的优选 IP，TTL 为 60 秒；AAAA 返回 NODATA，`/api/dns` 计数同步增长。
+
+### 配置入口
+
+`defaults.dns.listen` / `defaults.dns.ttl` / `defaults.expect_status` / `defaults.outputs`，以及域名级 `expect_status` / `allow_private` / `suppress_aaaa` 都可在「编辑域名清单」的图形化表单内修改；`formToConfig` 对空值一律 `delete`，不会把用户未设置的字段显式写进 `domains.json`。`off` 类词表（`off` / `disabled` / `none` / `0` / `false`）填在监听地址输入框内即可禁用应答器。
+
+### 前端渲染注意点
+
+域名列表使用 `table-layout:fixed`：`table-cell` 的 `max-width` 会被浏览器忽略，不固定列宽时一个超长域名就会把邻列顶开、造成状态文字与按钮重叠。flex 容器内的长文本项必须显式 `min-width:0`，否则 `max-width` + `text-overflow:ellipsis` 不生效。分流行由 `readonly input` 改为 `<pre>`：50+ 个域名在 input 内无法完整查看，且 `<input>` 也不能用 `Range` 可靠全选。
+
+
+### 重启恢复
+
+启动顺序：`initDNSServer(rt)` → `recoverSnapshot()` → `Run()`。`recoverSnapshot` 先读 `status.json` 建 `Snapshot{Status: st}` 并刷新视图，所以即使 `hosts.txt` / `agh.txt` 缺失，重启后应答器也立即可服务。
+
+### 安全
+
+默认只监听 `127.0.0.1`，与 AGH 同机部署时最安全。改为 `0.0.0.0` 对外监听时必须自行加防火墙：应答器无鉴权，任何能访问该端口的人都能让这些域名指向你选的 IP。

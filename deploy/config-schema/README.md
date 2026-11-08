@@ -46,8 +46,10 @@
 | `expand_max_subdomains` | int | 50 | 域名展开最大子域名数 (1..1000) |
 | `expand_sources` | string[] | ["wordlist", "rules"] | 全局默认展开来源 |
 | `history_retention_months` | int | 12 | 探测历史保留月数 (1..120)，过期分片自动清理 |
+| `dns.listen` | string | `127.0.0.1:18053` | 内置 DNS 应答器的 UDP 监听地址 `host:port`；空字符串禁用。填 `off` / `disabled` / `none` / `0` / `false` 也表示禁用。host 必须是 IP 字面量，留空表示监听全部接口 |
+| `dns.ttl` | int | 60 | 应答给 A 记录的 TTL 秒数 (5..3600)，决定 IP 切换的收敛上限 |
 
-`HO_SCHEDULE_MINUTES`、`HO_PROBE_DNS`、`HO_PROBE_CONCURRENCY` 可覆盖 `defaults`；`HO_PORT` / `HO_TZ` / `HO_CA_BUNDLE` / `HO_CONFIG` / `HO_OUTPUT` / `HO_STATE` 见 `deploy/README.md`。
+`HO_SCHEDULE_MINUTES`、`HO_PROBE_DNS`、`HO_PROBE_CONCURRENCY` 可覆盖 `defaults`；另有 `HO_DNS_LISTEN` 与 `HO_DNS_TTL` 可覆盖应答器配置（前者同样接受 off 类词表禁用）。`HO_PORT` / `HO_TZ` / `HO_CA_BUNDLE` / `HO_CONFIG` / `HO_OUTPUT` / `HO_STATE` 见 `deploy/README.md`。
 
 ## HTTP 端点（管理接口）
 
@@ -71,6 +73,58 @@
 文本端点返回 `ETag` / `Last-Modified`，支持 `If-None-Match` -> 304。  
 无有效 IP 时 `hosts.txt` / `agh.txt` 返回 503（防止 AGH 订阅空清单），`status.json` 视为 200 并说明原因；配置校验、原子写保证关键时刻保留上一轮产物，不写坏文件。
 
+## DNS 应答器：为什么比订阅更快
+
+AdGuard Home 的过滤器订阅刷新间隔**最低只能设 1 小时**，而 `$dnsrewrite` 规则本身是静态替换，没有 TTL、没有健康度概念（见 `internal/filtering/dnsrewrite.go` 的 `processDNSRewrites`：只把应答记录换成你写的 IP）。因此走订阅链路时，即使本服务已经切到新 IP，客户端仍会在最长一个订阅周期内继续拿到旧 IP。
+
+内置 DNS 应答器换了一条路：由 AGH 按域名分流、以普通上游的方式查询本服务。
+
+```
+探测 → 快照更新 → memory view 原子替换 → UDP 应答（TTL 由 dns.ttl 控制）
+```
+
+系统内唯一的时间常数从「AGH 刷新间隔 1h」变成「TTL（默认 60s）+ 探测周期」。
+
+### 接入方式
+
+在首页「DNS 应答服务」卡片复制分流规则，粘贴到 AGH 的「设置 → DNS 设置 → 上游 DNS 服务器」末尾，形如：
+
+```
+[/github.com/raw.githubusercontent.com/]127.0.0.1:18053
+
+```
+
+方括号内是**启用域名的完整名**（不是注册域），因为 `||domain^` 会匹配该域名及其全部子域；若只列注册域，已独立配置的子域会被父域规则劫持，永远拿不到自己的优选 IP。
+
+该模式与「过滤器订阅」**二选一**，不要同时启用。
+
+### 应答语义
+
+| 查询 | 应答 |
+| --- | --- |
+| A，命中且有生效 IP | `NOERROR` + 1 条 A，TTL 取 `dns.ttl` |
+| AAAA，命中 | `NOERROR` + 0 条（NODATA），与 `agh.txt` 的 AAAA 抑制一致 |
+| 其他类型，命中 | `NOERROR` + 0 条（只承诺 A/AAAA） |
+| 命中但该域名本轮无可用 IP | `REFUSED`（宁可解析失败，不返回旧 IP） |
+| 清单外域名 | `REFUSED` + 限频日志（暴露 AGH 分流清单与 `domains.json` 不同步） |
+| `QDCOUNT` 非法 / name 越界 / label 超长 | `FORMERR`（QDCOUNT 置 0）或静默丢弃 |
+| 报文短于 12 字节 | 静默丢弃并计入 `malformed` |
+| `QCLASS` 非 IN / 非查询包 | `REFUSED` / 静默丢弃 |
+
+域名匹配与 AGH 的 `||domain^` 对齐：先精确匹配，未命中则逐级去掉最左侧标签向上找父域规则（`a.b.c` → `b.c` → `c`），**不做后缀通配**。
+
+### 运行状态
+
+`GET /api/dns` 返回 `enabled` / `listen` / `addr` / `ttl` / `queries` / `answered` / `nodata` / `refused` / `malformed` / `last_query_at` / `agh_upstream`。首页同名卡片每 5 秒刷新一次并展示同样的计数。
+
+### 安全
+
+默认只监听 `127.0.0.1`，与 AGH 同机部署时最安全。若改为 `0.0.0.0` 对外监听，必须自行添加防火墙规则：应答器**无鉴权**，任何能访问该端口的人都能让这些域名指向你选的 IP。
+
+### 重启恢复
+
+启动时先从 `status.json` 恢复应答视图，再读 `hosts.txt` / `agh.txt`。因此即使产物文件缺失，重启后应答器也能立即服务，不会出现「重启后到首轮探测完成前分流域名全部 REFUSED」的真空期。
+
 ## 关于 IPv6：一个已验证的坑
 
 `||domain^$dnsrewrite=NOERROR;AAAA;` **不是合法规则**，AdGuard 的 urlfilter 源码（`rules/dnsrewrite.go` 的 `dnsRewriteRRHandlers[dns.TypeAAAA]`）要求 VALUE 必须是合法 IPv6 地址，否则会被判为非法；`loadDNSRewriteNormal` 仅在 `rrStr` 与 `valStr` **均为空** 时返回空 RCODE 通过，而这不区分记录类型。  
@@ -83,6 +137,8 @@
 1. **SSH 编辑**（目前最稳）：`/var/apps/hosts-optimizer-native/etc/domains.json`，保存后 `POST /refresh` 即时生效
 2. **共享目录**：在 `config/resource` 加 `data-share`，让用户在群晖文件管理器中编辑；需验证 `TRIM_DATA_SHARE_PATHS` 挂载目录，目前未启用
 3. **Web 编辑页面**：管理界面与订阅端点共用同一 HTTP 服务；「编辑域名清单」默认是图形化表单，可直接修改轮询周期、DNS、并发、超时、滞回与子域名展开参数，也可增删域名或打开单域名高级项；需要时切到 JSON 源码。上方域名发现工具支持输入主域名后勾选批量添加，状态表按主域名分组并支持整组勾选/批量删除
+
+   DNS 应答器的 `defaults.dns.listen` / `defaults.dns.ttl`、`defaults.expect_status`、`defaults.outputs` 以及域名级的 `expect_status` / `allow_private` / `suppress_aaaa` 都可在表单内直接填写；数值字段已带范围校验，off 类词表（`off` / `disabled` / `none` / `0` / `false`）可直接填在监听地址里禁用应答器。
 
 ## 本地启动
 ```bash

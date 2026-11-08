@@ -18,28 +18,28 @@ import (
 type Source string
 
 const (
-	SourceCT       Source = "ct"        // Certificate Transparency 日志
-	SourceWordlist Source = "wordlist"  // 常见子域名字典
-	SourceRules    Source = "rules"     // 内置服务规则
+	SourceCT       Source = "ct"       // Certificate Transparency 日志
+	SourceWordlist Source = "wordlist" // 常见子域名字典
+	SourceRules    Source = "rules"    // 内置服务规则
 )
 
 // Result 展开结果
 type Result struct {
-	Domain   string `json:"domain"`
-	Source   Source `json:"source"`
-	Resolved bool   `json:"resolved"`
+	Domain   string   `json:"domain"`
+	Source   Source   `json:"source"`
+	Resolved bool     `json:"resolved"`
 	IPs      []string `json:"ips,omitempty"`
 }
 
 // Options 展开选项
 type Options struct {
-	Sources           []Source
-	Concurrency       int
-	Timeout           time.Duration
-	MaxSubdomains     int
-	ProbeDNS          []string
-	AllowPrivate      bool
-	KnownRules        map[string][]string // domain -> subdomains
+	Sources       []Source
+	Concurrency   int
+	Timeout       time.Duration
+	MaxSubdomains int
+	ProbeDNS      []string
+	AllowPrivate  bool
+	KnownRules    map[string][]string // domain -> subdomains
 }
 
 // Expander 域名展开器
