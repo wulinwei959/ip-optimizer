@@ -108,6 +108,7 @@ AdGuard Home 的过滤器订阅刷新间隔**最低只能设 1 小时**，而 `$
 | 命中但该域名本轮无可用 IP | `REFUSED`（宁可解析失败，不返回旧 IP） |
 | 清单外域名 | `REFUSED` + 限频日志（暴露 AGH 分流清单与 `domains.json` 不同步） |
 | `QDCOUNT` 非法 / name 越界 / label 超长 | `FORMERR`（QDCOUNT 置 0）或静默丢弃 |
+| 报文短于 12 字节 | 静默丢弃并计入 `malformed` |
 | `QCLASS` 非 IN / 非查询包 | `REFUSED` / 静默丢弃 |
 
 域名匹配与 AGH 的 `||domain^` 对齐：先精确匹配，未命中则逐级去掉最左侧标签向上找父域规则（`a.b.c` → `b.c` → `c`），**不做后缀通配**。
@@ -137,7 +138,7 @@ AdGuard Home 的过滤器订阅刷新间隔**最低只能设 1 小时**，而 `$
 2. **共享目录**：在 `config/resource` 加 `data-share`，让用户在群晖文件管理器中编辑；需验证 `TRIM_DATA_SHARE_PATHS` 挂载目录，目前未启用
 3. **Web 编辑页面**：管理界面与订阅端点共用同一 HTTP 服务；「编辑域名清单」默认是图形化表单，可直接修改轮询周期、DNS、并发、超时、滞回与子域名展开参数，也可增删域名或打开单域名高级项；需要时切到 JSON 源码。上方域名发现工具支持输入主域名后勾选批量添加，状态表按主域名分组并支持整组勾选/批量删除
 
-   DNS 应答器的 `defaults.dns.listen` / `defaults.dns.ttl` 目前只在 JSON 源码模式下编辑（图形化表单暂未纳入），改完点「保存并生效」，下一轮探测自动跟随。
+   DNS 应答器的 `defaults.dns.listen` / `defaults.dns.ttl`、`defaults.expect_status`、`defaults.outputs` 以及域名级的 `expect_status` / `allow_private` / `suppress_aaaa` 都可在表单内直接填写；数值字段已带范围校验，off 类词表（`off` / `disabled` / `none` / `0` / `false`）可直接填在监听地址里禁用应答器。
 
 ## 本地启动
 ```bash
