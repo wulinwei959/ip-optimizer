@@ -2,7 +2,7 @@
 
 本目录只解决**部署与分发**，不含业务核心实现。
 
-当前版本 **1.0.14**；技术实现见 [`docs/technical.md`](../docs/technical.md)，版本历史与验证记录见 [`docs/progress.md`](../docs/progress.md)。
+当前版本 **1.1.0**；技术实现见 [`docs/technical.md`](../docs/technical.md)，版本历史与验证记录见 [`docs/progress.md`](../docs/progress.md)。
 
 ## 当前取舍：主轨 = fnOS 纯原生 FPK
 
@@ -150,11 +150,19 @@ curl -X POST http://127.0.0.1:18088/refresh
 
 **1.0.14 变更**：新增「关于」面板，展示版本号、GitHub 项目地址与使用说明；域名列表整体支持折叠，默认收起，点击标题展开。
 
+**1.1.0 变更**：新增内置 UDP DNS 应答器，AGH 按域名分流直连后，IP 切换最多一个 TTL（默认 60 秒）即可生效；所有配置项补齐图形化入口，并修复长域名与窄屏下的文字重叠。
+
 **仍需**：
 
 1. 确认桌面图标在真机显示（覆盖安装后可能要 `systemctl restart trim_app_center.service`）
-2. 在真实 AdGuard Home 实例中验证订阅解析与规则生效
-3. 用 `curl --resolve` 观察一周 IP 抖动与滞回表现
-4. 替换占位图标；用 `uname -m` 确认设备架构、选对安装包
-5. 刷新任务状态仅存于进程内存，服务重启后需要重新触发（产物不受影响）
-6. 若个别精简版 fnOS 上 `x509.SystemCertPool()` 读不到系统 CA，放一份 `deploy/ca-bundle.crt`，构建脚本会随包携带
+2. 观察一周 IP 抖动、滞回表现与 AdGuard Home 长期解析行为
+3. 刷新任务状态仅存于进程内存，服务重启后需要重新触发（产物不受影响）
+4. 若个别精简版 fnOS 上 `x509.SystemCertPool()` 读不到系统 CA，放一份 `deploy/ca-bundle.crt`，构建脚本会随包携带
+
+## 1.1.0 真机验收
+
+- fnOS x86 应用中心覆盖安装成功，manifest 版本为 `1.1.0`；旧配置、历史与产物保留。
+- 正式进程同时监听 `18088` 与 `127.0.0.1:18053`，启动后立即从磁盘恢复上一轮快照。
+- 直连 `18053` 查询 `github.com` 返回优选 IP，AAAA 返回 NODATA。
+- AGH `/control/dns_config` 写入完整分流规则后，经 53 端口查询 `github.com` 与 `raw.githubusercontent.com` 均返回优选 IP，TTL 为 60 秒。
+- AGH 运行配置与 fnOS 应用模板均保存相同分流规则，并保留普通 DNS 兜底，防止应用中心后续重启覆盖。

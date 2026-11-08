@@ -270,6 +270,23 @@ TTL 与分流域名清单在 `doRoundFor` 加载配置后每轮跟随；此外 `
 ```
 
 方括号内是**启用域名的完整名**而非注册域：`||domain^` 匹配该域名及全部子域，若只列注册域，已独立配置的子域会被父域规则劫持。禁用/删除域名后该行会即时收缩，需重新粘贴到 AGH。
+
+### AGH 配置与持久化
+
+AGH 与本服务同机部署时，可在 AGH「设置 → DNS 设置 → 上游 DNS 服务器」中把分流规则放在普通上游之前，并保留一个普通 DNS 作为未分流域名的兜底：
+
+```
+[/github.com/raw.githubusercontent.com/]127.0.0.1:18053
+223.5.5.5
+```
+
+AGH 提供 `/control/dns_config` 配置接口，可通过 `upstream_dns` 数组热更新上游列表，无需重启 AGH。fnOS 应用中心中的 AGH 可能在升级或重启时用应用模板重新生成运行配置，因此自动化部署除了调用控制接口，还应同步更新以下两处：
+
+- 运行配置：`/vol1/@appdata/AdGuardHome/AdGuardHome.yaml`
+- 应用模板：`/vol1/@appcenter/AdGuardHome/bin/AdGuardHome.yaml`
+
+真机 1.1.0 已验证：经 AGH 查询 `github.com` 与 `raw.githubusercontent.com` 返回本服务的优选 IP，TTL 为 60 秒；AAAA 返回 NODATA，`/api/dns` 计数同步增长。
+
 ### 配置入口
 
 `defaults.dns.listen` / `defaults.dns.ttl` / `defaults.expect_status` / `defaults.outputs`，以及域名级 `expect_status` / `allow_private` / `suppress_aaaa` 都可在「编辑域名清单」的图形化表单内修改；`formToConfig` 对空值一律 `delete`，不会把用户未设置的字段显式写进 `domains.json`。`off` 类词表（`off` / `disabled` / `none` / `0` / `false`）填在监听地址输入框内即可禁用应答器。
