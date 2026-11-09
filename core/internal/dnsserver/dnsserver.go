@@ -140,8 +140,8 @@ type Server struct {
 	malformed   atomic.Uint64
 	lastQueryAt atomic.Int64 // UnixNano，0 表示从未收到查询
 
-	missCount  atomic.Uint64 // 清单外 miss 计数，用于限频日志
-	missLastLog atomic.Int64 // 最近一次打印 miss 日志的 UnixNano（时间窗限频）
+	missCount   atomic.Uint64 // 清单外 miss 计数，用于限频日志
+	missLastLog atomic.Int64  // 最近一次打印 miss 日志的 UnixNano（时间窗限频）
 }
 
 // New 创建应答器；listen 为空字符串表示禁用，返回 nil。
@@ -227,6 +227,18 @@ func (s *Server) Serve(ctx context.Context) error {
 	defer func() {
 		s.started.Store(false)
 		_ = conn.Close()
+	}()
+
+	// ctx 取消时必须主动关闭 socket，否则 ReadFromUDP 会永久阻塞，
+	// 既泄漏 goroutine，也会让端口一直占用导致换绑失败。
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-stopWatch:
+		}
 	}()
 
 	buf := make([]byte, maxUDPSize)

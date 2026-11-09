@@ -1,9 +1,13 @@
 package app
 
 import (
+	"context"
+	"strings"
 	"testing"
+	"time"
 
 	"hosts-optimizer/internal/config"
+	"hosts-optimizer/internal/dnsserver"
 	"hosts-optimizer/internal/output"
 )
 
@@ -81,5 +85,72 @@ func TestWithPendingDomains(t *testing.T) {
 	}
 	if got[3].Name != "old.com" || !got[3].Disabled || got[3].Reason != "已禁用" {
 		t.Fatalf("禁用域名应标记已禁用: %+v", got[3])
+	}
+}
+
+func TestIsWildcardHost(t *testing.T) {
+	cases := map[string]bool{
+		"0.0.0.0":      true,
+		"::":           true,
+		"":             false,
+		"127.0.0.1":    false,
+		"192.168.3.59": false,
+	}
+	for host, want := range cases {
+		if got := isWildcardHost(host); got != want {
+			t.Fatalf("isWildcardHost(%q)=%v，期望 %v", host, got, want)
+		}
+	}
+}
+
+// 监听 0.0.0.0 时，分流行必须替换成容器可达的主机 IP，不能原样输出 0.0.0.0。
+func TestAghUpstreamLineReplacesWildcard(t *testing.T) {
+	a := &App{dnsSrv: dnsserver.New("0.0.0.0:18053"), dnsListen: "0.0.0.0:18053"}
+	a.updateDNSFamilies([]config.Domain{{Name: "github.com"}})
+
+	line := a.aghUpstreamLine()
+	if line == "" {
+		t.Fatal("分流行不应为空")
+	}
+	if strings.Contains(line, "0.0.0.0") {
+		t.Fatalf("分流行不应包含通配地址: %s", line)
+	}
+	if !strings.HasSuffix(line, ":18053") {
+		t.Fatalf("分流行端口不正确: %s", line)
+	}
+	if !strings.HasPrefix(line, "[/github.com/]") {
+		t.Fatalf("分流行域名段不正确: %s", line)
+	}
+}
+
+// 改监听地址后，应答器实际绑定地址与生成的分流行必须同步。
+func TestApplyDNSListenSyncsRule(t *testing.T) {
+	a := &App{dnsBaseCtx: context.Background()}
+	a.updateDNSFamilies([]config.Domain{{Name: "github.com"}})
+
+	a.applyDNSListen("127.0.0.1:0")
+	defer a.applyDNSListen("")
+
+	srv, _ := a.dnsServerSnapshot()
+	if srv == nil {
+		t.Fatal("监听未启动")
+	}
+	for i := 0; i < 400 && !srv.Started(); i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !srv.Started() {
+		t.Fatal("监听未就绪")
+	}
+
+	line := a.aghUpstreamLine()
+	if !strings.HasPrefix(line, "[/github.com/]127.0.0.1:") {
+		t.Fatalf("分流行主机段不正确: %s", line)
+	}
+	// 端口 0 由系统分配，分流行必须用真实端口而不是 0。
+	if strings.HasSuffix(line, ":0") {
+		t.Fatalf("分流行应使用实际绑定端口: %s", line)
+	}
+	if got := strings.TrimPrefix(line, "[/github.com/]"); !strings.HasSuffix(srv.Addr(), got) {
+		t.Fatalf("分流行与监听地址不同步: rule=%s addr=%s", got, srv.Addr())
 	}
 }
