@@ -51,10 +51,13 @@ type App struct {
 	lastSchedule int
 
 	// DNS 应答器（AdGuard Home 上游分流模式）
-	dnsSrv      *dnsserver.Server // listen 为空时为 nil（禁用）
-	dnsListen   string
-	dnsTTL      atomic.Int64
-	dnsFamilies []string // 启用域名的完整名，生成 AGH 上游行用
+	dnsSrv    *dnsserver.Server // listen 为空时为 nil（禁用）
+	dnsListen string
+	dnsTTL    atomic.Int64
+	// dnsFamilies 保存「启用域名的完整名」指针，生成 AGH 上游分流行用。
+	// 定时轮次与 HTTP 请求会并发读写该字段，因此存指针并原子替换：
+	// 直接存切片会造成 slice 头（ptr/len/cap）的撕裂读，输出半新半旧的域名清单。
+	dnsFamilies atomic.Pointer[[]string]
 
 	// 异步刷新任务
 	refreshMu   sync.Mutex
@@ -1086,11 +1089,15 @@ func (a *App) rebuildAGH(now time.Time) (int, error) {
 	if err := util.AtomicWrite(a.aghPath, built.AGH); err != nil {
 		return 0, fmt.Errorf("写入 AGH 规则失败: %w", err)
 	}
+	// 就地改 a.snap 会让并发读 /agh.txt 的请求看到「新内容配旧 ETag」
+	// （serve 取字段不在同一临界区）。改为整对象替换一个浅拷贝。
 	a.mu.Lock()
-	if a.snap != nil {
-		a.snap.AGH = built.AGH
-		a.snap.AGHETag = built.AGHETag
-		a.snap.Modified = now
+	if cur := a.snap; cur != nil {
+		next := *cur
+		next.AGH = built.AGH
+		next.AGHETag = built.AGHETag
+		next.Modified = now
+		a.snap = &next
 	}
 	a.mu.Unlock()
 	return len(built.AGH), nil

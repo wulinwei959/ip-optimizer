@@ -66,7 +66,16 @@ func (a *App) updateDNSFamilies(domains []config.Domain) {
 		out = append(out, name)
 	}
 	sort.Strings(out)
-	a.dnsFamilies = out
+	// 整体替换指针而非就地写切片：读侧只需一次原子加载即可拿到一致的快照。
+	a.dnsFamilies.Store(&out)
+}
+
+// dnsFamiliesSnapshot 读取当前家族清单的稳定副本，nil 表示应答器不可用。
+func (a *App) dnsFamiliesSnapshot() []string {
+	if p := a.dnsFamilies.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 // refreshDNSFamiliesFromConfig 重新读取磁盘配置并刷新家族清单。
@@ -82,7 +91,8 @@ func (a *App) refreshDNSFamiliesFromConfig() {
 
 // aghUpstreamLine 生成可直接粘贴到 AGH「上游 DNS 服务器」的分流行。
 func (a *App) aghUpstreamLine() string {
-	if a.dnsSrv == nil || a.dnsListen == "" || len(a.dnsFamilies) == 0 {
+	families := a.dnsFamiliesSnapshot()
+	if a.dnsSrv == nil || a.dnsListen == "" || len(families) == 0 {
 		return ""
 	}
 	// AGH 语法：[/域名/域名/]主机:端口
@@ -93,7 +103,7 @@ func (a *App) aghUpstreamLine() string {
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	return "[/" + strings.Join(a.dnsFamilies, "/") + "/]" + host + ":" + port
+	return "[/" + strings.Join(families, "/") + "/]" + host + ":" + port
 }
 
 // dnsStatusJSON 组装 /api/dns 的返回内容。

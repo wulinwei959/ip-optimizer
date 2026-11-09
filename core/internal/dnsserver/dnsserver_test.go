@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -295,4 +297,56 @@ func answerA(resp []byte) (string, int) {
 	}
 	ttl := int(uint32(resp[off+6])<<24 | uint32(resp[off+7])<<16 | uint32(resp[off+8])<<8 | uint32(resp[off+9]))
 	return net.IP(resp[off+12 : off+16]).String(), ttl
+}
+
+// TestNewViewDuplicateNormalized 验证规范化后同名的记录只保留一条，不静默丢失。
+func TestNewViewDuplicateNormalized(t *testing.T) {
+	v := NewView([]Record{
+		{Name: "github.com", IP: "1.1.1.1"},
+		{Name: "GitHub.com.", IP: "2.2.2.2"},
+	}, 60)
+	if rec, ok := v.Lookup("github.com"); !ok {
+		t.Fatal("规范化同名记录应仍可命中")
+	} else if rec.IP != "2.2.2.2" && rec.IP != "1.1.1.1" {
+		t.Fatalf("同名记录取值异常: %q", rec.IP)
+	}
+}
+
+// TestLookupDegenerateNameTerminates 验证畸形查询名不会让父域回退循环空转。
+func TestLookupDegenerateNameTerminates(t *testing.T) {
+	v := NewView([]Record{{Name: "github.com", IP: "1.1.1.1"}}, 60)
+	done := make(chan bool, 1)
+	go func() {
+		if _, ok := v.Lookup(strings.Repeat(".", 200)); ok {
+			t.Error("畸形域名不应命中")
+		}
+		done <- true
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("父域回退循环在畸形输入上未能及时返回")
+	}
+}
+
+// TestViewLookupConcurrent 验证视图对多 goroutine 并发查询安全（配合 -race 使用）。
+func TestViewLookupConcurrent(t *testing.T) {
+	v := NewView([]Record{
+		{Name: "github.com", IP: "1.1.1.1"},
+		{Name: "raw.githubusercontent.com", IP: "2.2.2.2"},
+	}, 60)
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				if rec, ok := v.Lookup("api.github.com"); !ok || rec.IP != "1.1.1.1" {
+					t.Error("并发父域回退结果不一致")
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
