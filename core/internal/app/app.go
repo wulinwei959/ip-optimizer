@@ -53,6 +53,7 @@ type App struct {
 	// DNS 应答器（AdGuard Home 上游分流模式）
 	dnsSrv    *dnsserver.Server // listen 为空时为 nil（禁用）
 	dnsListen string
+	dnsMu     sync.RWMutex // 保护 dnsSrv / dnsListen 的换绑
 	dnsTTL    atomic.Int64
 	startedAt time.Time
 	roundSeq  atomic.Int64 // 原子计数器，生成唯一 RoundID
@@ -64,6 +65,12 @@ type App struct {
 	// 异步刷新任务
 	refreshMu   sync.Mutex
 	refreshTask *refreshTask
+
+	// DNS 应答器生命周期：监听地址变更时需要重绑，故保存根 ctx 与取消函数。
+	dnsBaseCtx context.Context
+	dnsCancel  context.CancelFunc
+	dnsDone    chan struct{}
+	errCh      chan error
 }
 
 // 刷新任务状态取值。
@@ -119,7 +126,7 @@ func New(rt *config.Runtime, version string) (*App, error) {
 		history:      hs,
 		version:      version,
 		lastSchedule: rt.Config.Defaults.ScheduleMinutes,
-	startedAt:    time.Now(),
+		startedAt:    time.Now(),
 	}
 	// 必须先于 recoverSnapshot：恢复流程会刷新应答视图。
 	a.initDNSServer(rt)
@@ -198,6 +205,8 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	// 容量 2：HTTP 与 DNS 应答器两个生产者，避免任一方的错误阻塞导致 goroutine 泄漏。
 	errCh := make(chan error, 2)
+	a.errCh = errCh
+	a.dnsBaseCtx = ctx
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
@@ -205,9 +214,7 @@ func (a *App) Run(ctx context.Context) error {
 	}()
 	log.Printf("HTTP 服务已启动，监听 :%s", a.port)
 	// DNS 监听失败属致命错误：返回后进程退出，由 init 系统的 Restart=always 拉起。
-	if a.dnsSrv != nil {
-		go func() { errCh <- a.dnsSrv.Serve(ctx) }()
-	}
+	a.ensureDNSServerStarted()
 
 	for {
 		select {
@@ -256,6 +263,7 @@ func (a *App) doRoundFor(ctx context.Context, only map[string]bool) (int, error)
 	d := rt.Config.Defaults
 	// DNS 应答器的 TTL 与分流域名清单每轮跟随配置，改完 domains.json 下一轮生效。
 	a.dnsTTL.Store(int64(d.DNS.TTL))
+	a.applyDNSListen(d.DNS.Listen)
 	a.updateDNSFamilies(rt.Config.Domains)
 	timeout := time.Duration(d.TimeoutSeconds) * time.Second
 	started := time.Now()
@@ -348,11 +356,11 @@ func (a *App) doRoundFor(ctx context.Context, only map[string]bool) (int, error)
 	round := output.RoundInfo{
 		StartedAt: started, FinishedAt: now, OK: true,
 		ScheduleMinutes: d.ScheduleMinutes,
-	RoundID:   a.roundSeq.Add(1),
+		RoundID:         a.roundSeq.Add(1),
 	}
-a.appendHistory(refreshed, now, fmt.Sprintf("r%d", a.roundSeq.Load()))
+	a.appendHistory(refreshed, now, fmt.Sprintf("r%d", a.roundSeq.Load()))
 	a.stateMu.Lock()
-a.state.SaveAsync(a.statePath, now)
+	a.state.SaveAsync(a.statePath, now)
 	a.stateMu.Unlock()
 	snap, err := output.Build(entries, now, round)
 	if err != nil {
@@ -712,6 +720,8 @@ func (a *App) handleDomainsConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		log.Printf("配置已更新: %s（%d 字节）", a.configPath, len(body))
+		// 监听地址必须与分流行同步：保存即重绑，规则随实际监听地址一起变化。
+		a.applyDNSListen(parsed.Defaults.DNS.Listen)
 		// 增删域名后即时刷新 AGH 上游分流行，避免用户已删除的域名仍被分流过来。
 		a.refreshDNSFamiliesFromConfig()
 		// 保存后立即把禁用域名从产物中移除，避免页面显示禁用但订阅仍在生效。
@@ -1003,7 +1013,7 @@ func (a *App) handleSwitch(w http.ResponseWriter, r *http.Request) {
 	st.ChallengerIP = ""
 	st.ChallengerWins = 0
 	st.ConsecutiveFailures = 0
-a.state.SaveAsync(a.statePath, now)
+	a.state.SaveAsync(a.statePath, now)
 	candidateCount := len(st.Candidates)
 	a.stateMu.Unlock()
 
@@ -1035,7 +1045,7 @@ a.state.SaveAsync(a.statePath, now)
 	round := output.RoundInfo{
 		StartedAt: snap.Status.GeneratedAt, FinishedAt: now, OK: true,
 		ScheduleMinutes: snap.Status.ScheduleMinutes,
-	RoundID:   a.roundSeq.Add(1),
+		RoundID:         a.roundSeq.Add(1),
 	}
 	built, err := output.Build(entries, now, round)
 	if err != nil {
@@ -1078,7 +1088,7 @@ func (a *App) rebuildAGH(now time.Time) (int, error) {
 	round := output.RoundInfo{
 		StartedAt: snap.Status.GeneratedAt, FinishedAt: now, OK: true,
 		ScheduleMinutes: snap.Status.ScheduleMinutes,
-	RoundID:   a.roundSeq.Add(1),
+		RoundID:         a.roundSeq.Add(1),
 	}
 	built, err := output.Build(entries, now, round)
 	if err != nil {
@@ -1279,7 +1289,7 @@ func (a *App) removeFromSnapshot(names map[string]bool) error {
 	round := output.RoundInfo{
 		StartedAt: snap.Status.GeneratedAt, FinishedAt: now, OK: true,
 		ScheduleMinutes: snap.Status.ScheduleMinutes,
-	RoundID:   a.roundSeq.Add(1),
+		RoundID:         a.roundSeq.Add(1),
 	}
 	built, err := output.Build(kept, now, round)
 	if err != nil {
@@ -1709,7 +1719,7 @@ a.about-value:hover{text-decoration:underline}
         <label class="wide">监听地址（host:port）<input id="fDNSListen" type="text" placeholder="127.0.0.1:18053；填 off 表示禁用"></label>
         <label>应答 TTL（秒）<input id="fDNSTTL" type="number" min="5" max="3600"></label>
       </div>
-      <p class="hint" style="margin:8px 0 0">留空使用默认值 127.0.0.1:18053 与 60 秒。地址必须是 IP 字面量（留空 host 表示监听全部接口，需自行加防火墙）；填 off / disabled / none / 0 / false 可禁用。修改后下一轮探测生效，页面「DNS 应答服务」卡片会显示当前值与分流规则。</p>
+      <p class="hint" style="margin:8px 0 0">留空使用默认值 127.0.0.1:18053 与 60 秒。地址必须是 IP 字面量（留空 host 表示监听全部接口，需自行加防火墙）；填 off / disabled / none / 0 / false 可禁用。修改后下一轮探测会自动重绑监听，页面「DNS 应答服务」卡片会显示当前值与分流规则。<strong>AdGuard Home 用 Docker 部署时，这里填 0.0.0.0:18053 或 NAS 内网 IP；填 0.0.0.0 时分流行会自动替换为本机内网 IP。</strong></p>
       <p class="hint" style="margin:8px 0 0"><strong>注意</strong>：与 AdGuard Home 的过滤器订阅二选一，不要同时启用。</p>
     </div>
   </details>
