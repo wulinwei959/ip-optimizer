@@ -51,10 +51,15 @@ type App struct {
 	lastSchedule int
 
 	// DNS 应答器（AdGuard Home 上游分流模式）
-	dnsSrv      *dnsserver.Server // listen 为空时为 nil（禁用）
-	dnsListen   string
-	dnsTTL      atomic.Int64
-	dnsFamilies []string // 启用域名的完整名，生成 AGH 上游行用
+	dnsSrv    *dnsserver.Server // listen 为空时为 nil（禁用）
+	dnsListen string
+	dnsTTL    atomic.Int64
+	startedAt time.Time
+	roundSeq  atomic.Int64 // 原子计数器，生成唯一 RoundID
+	// dnsFamilies 保存「启用域名的完整名」指针，生成 AGH 上游分流行用。
+	// 定时轮次与 HTTP 请求会并发读写该字段，因此存指针并原子替换：
+	// 直接存切片会造成 slice 头（ptr/len/cap）的撕裂读，输出半新半旧的域名清单。
+	dnsFamilies atomic.Pointer[[]string]
 
 	// 异步刷新任务
 	refreshMu   sync.Mutex
@@ -114,6 +119,7 @@ func New(rt *config.Runtime, version string) (*App, error) {
 		history:      hs,
 		version:      version,
 		lastSchedule: rt.Config.Defaults.ScheduleMinutes,
+	startedAt:    time.Now(),
 	}
 	// 必须先于 recoverSnapshot：恢复流程会刷新应答视图。
 	a.initDNSServer(rt)
@@ -339,17 +345,15 @@ func (a *App) doRoundFor(ctx context.Context, only map[string]bool) (int, error)
 	}
 
 	now := time.Now()
-	a.appendHistory(refreshed, now, fmt.Sprintf("r%d", started.UnixNano()))
 	round := output.RoundInfo{
 		StartedAt: started, FinishedAt: now, OK: true,
 		ScheduleMinutes: d.ScheduleMinutes,
+	RoundID:   a.roundSeq.Add(1),
 	}
+a.appendHistory(refreshed, now, fmt.Sprintf("r%d", a.roundSeq.Load()))
 	a.stateMu.Lock()
-	saveErr := a.state.Save(a.statePath, now)
+a.state.SaveAsync(a.statePath, now)
 	a.stateMu.Unlock()
-	if saveErr != nil {
-		log.Printf("保存状态失败: %v", saveErr)
-	}
 	snap, err := output.Build(entries, now, round)
 	if err != nil {
 		return d.ScheduleMinutes, err
@@ -501,6 +505,8 @@ func (a *App) handle(w http.ResponseWriter, r *http.Request) {
 		a.handleRefreshAGH(w, r)
 	case "/api/disable":
 		a.handleDisable(w, r)
+	case "/healthz":
+		a.handleHealthz(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -923,7 +929,7 @@ func (a *App) handleCandidates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.stateMu.RLock()
-	st := a.state.Domains[domain]
+	st := a.state.AllDomains()[domain]
 	current := ""
 	candidates := []store.Candidate{}
 	if st != nil {
@@ -975,7 +981,7 @@ func (a *App) handleSwitch(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 
 	a.stateMu.Lock()
-	st := a.state.Domains[domain]
+	st := a.state.AllDomains()[domain]
 	var chosen store.Candidate
 	found := false
 	if st != nil {
@@ -997,13 +1003,9 @@ func (a *App) handleSwitch(w http.ResponseWriter, r *http.Request) {
 	st.ChallengerIP = ""
 	st.ChallengerWins = 0
 	st.ConsecutiveFailures = 0
-	saveErr := a.state.Save(a.statePath, now)
+a.state.SaveAsync(a.statePath, now)
 	candidateCount := len(st.Candidates)
 	a.stateMu.Unlock()
-	if saveErr != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "保存状态失败: " + saveErr.Error()})
-		return
-	}
 
 	a.mu.RLock()
 	snap := a.snap
@@ -1033,6 +1035,7 @@ func (a *App) handleSwitch(w http.ResponseWriter, r *http.Request) {
 	round := output.RoundInfo{
 		StartedAt: snap.Status.GeneratedAt, FinishedAt: now, OK: true,
 		ScheduleMinutes: snap.Status.ScheduleMinutes,
+	RoundID:   a.roundSeq.Add(1),
 	}
 	built, err := output.Build(entries, now, round)
 	if err != nil {
@@ -1075,6 +1078,7 @@ func (a *App) rebuildAGH(now time.Time) (int, error) {
 	round := output.RoundInfo{
 		StartedAt: snap.Status.GeneratedAt, FinishedAt: now, OK: true,
 		ScheduleMinutes: snap.Status.ScheduleMinutes,
+	RoundID:   a.roundSeq.Add(1),
 	}
 	built, err := output.Build(entries, now, round)
 	if err != nil {
@@ -1086,11 +1090,15 @@ func (a *App) rebuildAGH(now time.Time) (int, error) {
 	if err := util.AtomicWrite(a.aghPath, built.AGH); err != nil {
 		return 0, fmt.Errorf("写入 AGH 规则失败: %w", err)
 	}
+	// 就地改 a.snap 会让并发读 /agh.txt 的请求看到「新内容配旧 ETag」
+	// （serve 取字段不在同一临界区）。改为整对象替换一个浅拷贝。
 	a.mu.Lock()
-	if a.snap != nil {
-		a.snap.AGH = built.AGH
-		a.snap.AGHETag = built.AGHETag
-		a.snap.Modified = now
+	if cur := a.snap; cur != nil {
+		next := *cur
+		next.AGH = built.AGH
+		next.AGHETag = built.AGHETag
+		next.Modified = now
+		a.snap = &next
 	}
 	a.mu.Unlock()
 	return len(built.AGH), nil
@@ -1115,6 +1123,28 @@ func (a *App) handleRefreshAGH(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "bytes": n})
+}
+
+// handleHealthz 健康检查端点，供容器编排/负载均衡探活。
+func (a *App) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "仅支持 GET / HEAD"})
+		return
+	}
+	a.mu.RLock()
+	snap := a.snap
+	a.mu.RUnlock()
+	resp := map[string]any{
+		"ok":      true,
+		"version": a.version,
+		"uptime":  time.Since(a.startedAt).String(),
+	}
+	if snap != nil {
+		resp["dns_enabled"] = a.dnsSrv != nil
+		resp["last_round"] = snap.Status.GeneratedAt.Format(time.RFC3339)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleDisable 批量启用/禁用域名，立即写回配置并从产物中移除被禁用的域名。
@@ -1249,6 +1279,7 @@ func (a *App) removeFromSnapshot(names map[string]bool) error {
 	round := output.RoundInfo{
 		StartedAt: snap.Status.GeneratedAt, FinishedAt: now, OK: true,
 		ScheduleMinutes: snap.Status.ScheduleMinutes,
+	RoundID:   a.roundSeq.Add(1),
 	}
 	built, err := output.Build(kept, now, round)
 	if err != nil {

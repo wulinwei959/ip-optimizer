@@ -15,6 +15,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"strings"
 	"sync/atomic"
@@ -68,7 +69,10 @@ func NewView(records []Record, ttl int) *View {
 		if name == "" {
 			continue
 		}
-		// 同名记录后者覆盖前者：调用方保证 inputs 已按优先级排序。
+		if prev, dup := v.records[name]; dup {
+			// 规范化后同名只保留一条，明确记下覆盖关系，避免静默丢失更高优先级记录。
+			log.Printf("[dnsserver] 规范化后同名记录 %q：%s 覆盖 %s", name, r.IP, prev.IP)
+		}
 		v.records[name] = Record{Name: name, IP: r.IP}
 	}
 	return v
@@ -93,12 +97,13 @@ func (v *View) Lookup(name string) (Record, bool) {
 		return r, true
 	}
 	// 逐级去掉最左侧标签向上找父域：a.b.c → b.c → c
-	for {
-		i := strings.IndexByte(q, '.')
-		if i < 0 || i == len(q)-1 {
+	// 迭代上限为标签数：正常域名剥到根即结束，畸形输入也不会无限空转。
+	for hops := 0; hops < maxNameLabels; hops++ {
+		dot := strings.IndexByte(q, '.')
+		if dot < 0 || dot == len(q)-1 {
 			break
 		}
-		q = q[i+1:]
+		q = q[dot+1:]
 		if r, ok := v.records[q]; ok {
 			return r, true
 		}
@@ -135,7 +140,8 @@ type Server struct {
 	malformed   atomic.Uint64
 	lastQueryAt atomic.Int64 // UnixNano，0 表示从未收到查询
 
-	missCount atomic.Uint64 // 清单外 miss 计数，用于限频日志
+	missCount  atomic.Uint64 // 清单外 miss 计数，用于限频日志
+	missLastLog atomic.Int64 // 最近一次打印 miss 日志的 UnixNano（时间窗限频）
 }
 
 // New 创建应答器；listen 为空字符串表示禁用，返回 nil。
@@ -325,18 +331,26 @@ func (s *Server) handlePacket(conn *net.UDPConn, remote *net.UDPAddr, packet []b
 	}
 }
 
-// countMiss 对清单外域名做限频日志：每 100 条打一次，附最新 miss 域名，
-// 既能暴露「AGH 分流清单与 domains.json 不同步」，又不会刷屏。
+// countMiss 对清单外域名做限频日志：时间窗限频（默认 10 秒内最多 1 条）。
 func (s *Server) countMiss(name string) {
 	if v := s.view.Load(); v != nil {
 		if _, hit := v.Lookup(name); hit {
 			return
 		}
 	}
-	n := s.missCount.Add(1)
-	if n%100 == 1 {
-		fmt.Printf("[dnsserver] 清单外查询累计 %d 条，最新: %s（请检查 AGH 上游分流规则是否与 domains.json 同步）\n", n, name)
+	s.missCount.Add(1)
+	now := time.Now().UnixNano()
+	last := s.missLastLog.Load()
+	// 10 秒内最多打印一次
+	if now-last < 10_000_000_000 {
+		return
 	}
+	if !s.missLastLog.CompareAndSwap(last, now) {
+		return
+	}
+	// 走 log 而非 fmt.Printf：main 里的 MultiWriter 会同时送入内存环形缓冲，
+	// 这样限频告警也能出现在状态页的「运行日志」面板里。
+	log.Printf("[dnsserver] 清单外查询累计 %d 条，最新: %s（请检查 AGH 上游分流规则是否与 domains.json 同步）", s.missCount.Load(), name)
 }
 
 // parseQuery 做最小解析。ok=false 表示报文畸形。
