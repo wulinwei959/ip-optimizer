@@ -121,9 +121,9 @@ func (a *App) dnsStatusJSON() map[string]any {
 		"refused":   st.Refused,
 		"malformed": st.Malformed,
 	}
-	if !st.LastQueryAt.IsZero() {
-		resp["last_query_at"] = st.LastQueryAt.Format(time.RFC3339)
-	}
+if !st.LastQueryAt.IsZero() {
+	resp["last_query_at"] = st.LastQueryAt.Format(time.RFC3339)
+}
 	if a.dnsSrv == nil {
 		resp["hint"] = "DNS 应答器未启用：在 domains.json 的 defaults.dns.listen 填写监听地址（如 127.0.0.1:18053）后重启服务"
 		return resp

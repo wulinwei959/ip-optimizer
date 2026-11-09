@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"hosts-optimizer/internal/util"
@@ -33,11 +34,30 @@ type DomainState struct {
 type State struct {
 	UpdatedAt time.Time               `json:"updated_at"`
 	Domains   map[string]*DomainState `json:"domains"`
+
+	// 异步落盘用
+	mu   sync.Mutex
+	path string
+	wg   sync.WaitGroup
 }
+
+// Storer 定义状态存储接口，便于未来替换为 SQLite 等实现。
+type Storer interface {
+	Save(path string, now time.Time) error
+	SaveAsync(path string, now time.Time)
+	Decide(name string, valid []Candidate, percent, rounds int, now time.Time) Decision
+	// AllDomains 返回底层域名状态映射，供直接读写（如手动切换 IP、查询候选）。
+	AllDomains() map[string]*DomainState
+	// SetUpdatedAt 更新时间戳（Save 内部会调用，外部一般无需调用）。
+	SetUpdatedAt(time.Time)
+}
+
+// 确保 *State 实现 Storer
+var _ Storer = (*State)(nil)
 
 // Load 读取状态；文件不存在或损坏时返回空状态，不让服务起不来。
 func Load(path string) (*State, bool, error) {
-	s := &State{Domains: make(map[string]*DomainState)}
+	s := &State{Domains: make(map[string]*DomainState), path: path}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -54,14 +74,46 @@ func Load(path string) (*State, bool, error) {
 	return s, false, nil
 }
 
-// Save 原子写状态文件。
+// Save 同步原子写状态文件（兼容旧调用）。
 func (s *State) Save(path string, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.UpdatedAt = now
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
 	return util.AtomicWrite(path, append(b, '\n'))
+}
+
+// SaveAsync 异步落盘：拷贝快照、启动 goroutine 写入，不阻塞调用方。
+// 调用方需自行保证并发安全（通常在持有 stateMu 时调用）。
+func (s *State) SaveAsync(path string, now time.Time) {
+	s.wg.Add(1)
+	go func(p string, t time.Time) {
+		defer s.wg.Done()
+		// 拷贝数据避免并发修改
+		s.mu.Lock()
+		s.UpdatedAt = t
+		data, _ := json.MarshalIndent(s, "", "  ")
+		s.mu.Unlock()
+		_ = util.AtomicWrite(p, append(data, '\n'))
+	}(path, now)
+}
+
+// WaitSave 等待所有异步落盘完成（测试/关闭时用）。
+func (s *State) WaitSave() {
+	s.wg.Wait()
+}
+
+// AllDomains 实现 Storer 接口。
+func (s *State) AllDomains() map[string]*DomainState {
+	return s.Domains
+}
+
+// SetUpdatedAt 实现 Storer 接口。
+func (s *State) SetUpdatedAt(t time.Time) {
+	s.UpdatedAt = t
 }
 
 // Decision 是本轮最终生效的结果。

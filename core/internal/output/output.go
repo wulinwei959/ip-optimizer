@@ -29,6 +29,7 @@ type RoundInfo struct {
 	OK              bool      `json:"ok"`
 	Error           string    `json:"error,omitempty"`
 	ScheduleMinutes int       `json:"schedule_minutes"`
+	RoundID         int64     `json:"round_id,omitempty"`
 }
 
 // StatusDomain 是 status.json 中的单域名条目。

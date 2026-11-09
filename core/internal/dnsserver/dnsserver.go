@@ -140,7 +140,8 @@ type Server struct {
 	malformed   atomic.Uint64
 	lastQueryAt atomic.Int64 // UnixNano，0 表示从未收到查询
 
-	missCount atomic.Uint64 // 清单外 miss 计数，用于限频日志
+	missCount  atomic.Uint64 // 清单外 miss 计数，用于限频日志
+	missLastLog atomic.Int64 // 最近一次打印 miss 日志的 UnixNano（时间窗限频）
 }
 
 // New 创建应答器；listen 为空字符串表示禁用，返回 nil。
@@ -330,20 +331,26 @@ func (s *Server) handlePacket(conn *net.UDPConn, remote *net.UDPAddr, packet []b
 	}
 }
 
-// countMiss 对清单外域名做限频日志：每 100 条打一次，附最新 miss 域名，
-// 既能暴露「AGH 分流清单与 domains.json 不同步」，又不会刷屏。
+// countMiss 对清单外域名做限频日志：时间窗限频（默认 10 秒内最多 1 条）。
 func (s *Server) countMiss(name string) {
 	if v := s.view.Load(); v != nil {
 		if _, hit := v.Lookup(name); hit {
 			return
 		}
 	}
-	n := s.missCount.Add(1)
-	if n%100 == 1 {
-		// 走 log 而非 fmt.Printf：main 里的 MultiWriter 会同时送入内存环形缓冲，
-		// 这样限频告警也能出现在状态页的「运行日志」面板里。
-		log.Printf("[dnsserver] 清单外查询累计 %d 条，最新: %s（请检查 AGH 上游分流规则是否与 domains.json 同步）", n, name)
+	s.missCount.Add(1)
+	now := time.Now().UnixNano()
+	last := s.missLastLog.Load()
+	// 10 秒内最多打印一次
+	if now-last < 10_000_000_000 {
+		return
 	}
+	if !s.missLastLog.CompareAndSwap(last, now) {
+		return
+	}
+	// 走 log 而非 fmt.Printf：main 里的 MultiWriter 会同时送入内存环形缓冲，
+	// 这样限频告警也能出现在状态页的「运行日志」面板里。
+	log.Printf("[dnsserver] 清单外查询累计 %d 条，最新: %s（请检查 AGH 上游分流规则是否与 domains.json 同步）", s.missCount.Load(), name)
 }
 
 // parseQuery 做最小解析。ok=false 表示报文畸形。
