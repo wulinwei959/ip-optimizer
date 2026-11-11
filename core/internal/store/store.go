@@ -3,6 +3,7 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -44,11 +45,14 @@ type State struct {
 // Storer 定义状态存储接口，便于未来替换为 SQLite 等实现。
 type Storer interface {
 	Save(path string, now time.Time) error
-	SaveAsync(path string, now time.Time)
+	// Snapshot 在调用方持有的写锁内序列化整个状态，返回可直接落盘的字节。
+	Snapshot(now time.Time) []byte
+	// SaveAsync 异步落盘；data 必须来自 Snapshot，本方法不再触碰 State 内部数据。
+	SaveAsync(path string, data []byte)
 	Decide(name string, valid []Candidate, percent, rounds int, now time.Time) Decision
 	// AllDomains 返回底层域名状态映射，供直接读写（如手动切换 IP、查询候选）。
 	AllDomains() map[string]*DomainState
-	// SetUpdatedAt 更新时间戳（Save 内部会调用，外部一般无需调用）。
+	// SetUpdatedAt 更新时间戳（Snapshot 内部会调用，外部一般无需调用）。
 	SetUpdatedAt(time.Time)
 }
 
@@ -74,31 +78,41 @@ func Load(path string) (*State, bool, error) {
 	return s, false, nil
 }
 
-// Save 同步原子写状态文件（兼容旧调用）。
-func (s *State) Save(path string, now time.Time) error {
+// Snapshot 序列化整个状态，返回可直接落盘的字节（末尾带换行）。
+//
+// 必须在调用方持有的写锁内调用（App 里是 stateMu）：Domains map 的并发读写由调用方
+// 串行化，State 自身的 s.mu 只保护 UpdatedAt。若把序列化挪到写盘的 goroutine 里，
+// 就会与并发执行的 Decide 撞上「并发 map 读写」，Go 会直接 fatal 终止进程。
+func (s *State) Snapshot(now time.Time) []byte {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.UpdatedAt = now
 	b, err := json.MarshalIndent(s, "", "  ")
+	s.mu.Unlock()
 	if err != nil {
-		return err
+		return nil
 	}
-	return util.AtomicWrite(path, append(b, '\n'))
+	return append(b, '\n')
 }
 
-// SaveAsync 异步落盘：拷贝快照、启动 goroutine 写入，不阻塞调用方。
-// 调用方需自行保证并发安全（通常在持有 stateMu 时调用）。
-func (s *State) SaveAsync(path string, now time.Time) {
+// Save 同步原子写状态文件（兼容旧调用）。
+func (s *State) Save(path string, now time.Time) error {
+	b := s.Snapshot(now)
+	if b == nil {
+		return errors.New("序列化状态失败")
+	}
+	return util.AtomicWrite(path, b)
+}
+
+// SaveAsync 异步落盘：字节快照由调用方在锁内生成，本方法只负责写盘，不阻塞调用方。
+func (s *State) SaveAsync(path string, data []byte) {
+	if len(data) == 0 {
+		return
+	}
 	s.wg.Add(1)
-	go func(p string, t time.Time) {
+	go func(p string, b []byte) {
 		defer s.wg.Done()
-		// 拷贝数据避免并发修改
-		s.mu.Lock()
-		s.UpdatedAt = t
-		data, _ := json.MarshalIndent(s, "", "  ")
-		s.mu.Unlock()
-		_ = util.AtomicWrite(p, append(data, '\n'))
-	}(path, now)
+		_ = util.AtomicWrite(p, b)
+	}(path, data)
 }
 
 // WaitSave 等待所有异步落盘完成（测试/关闭时用）。
@@ -113,7 +127,9 @@ func (s *State) AllDomains() map[string]*DomainState {
 
 // SetUpdatedAt 实现 Storer 接口。
 func (s *State) SetUpdatedAt(t time.Time) {
+	s.mu.Lock()
 	s.UpdatedAt = t
+	s.mu.Unlock()
 }
 
 // Decision 是本轮最终生效的结果。

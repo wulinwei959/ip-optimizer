@@ -47,6 +47,10 @@ type Defaults struct {
 	MaxCandidates          int       `json:"max_candidates"`
 	TCPRounds              int       `json:"tcp_rounds"`
 	TimeoutSeconds         int       `json:"timeout_seconds"`
+	ProbeTopN              int       `json:"probe_top_n"`
+	ProbeFullEvery         int       `json:"probe_full_every"`
+	WatchIntervalSeconds   int       `json:"watch_interval_seconds"`
+	WatchSwitchPercent     int       `json:"watch_switch_percent"`
 	ExpandConcurrency      int       `json:"expand_concurrency"`
 	ExpandTimeoutSeconds   int       `json:"expand_timeout_seconds"`
 	ExpandMaxSubdomains    int       `json:"expand_max_subdomains"`
@@ -179,6 +183,22 @@ func applyDefaults(c *Config) {
 	if d.TCPRounds <= 0 {
 		d.TCPRounds = 3
 	}
+	// 自适应探测面：常规轮次只测「当前 IP + 前 N 个挑战者」，每 K 轮做一次全量扫描。
+	if d.ProbeTopN <= 0 {
+		d.ProbeTopN = 5
+	}
+	if d.ProbeFullEvery <= 0 {
+		d.ProbeFullEvery = 6
+	}
+	// 健康探针：每隔若干秒只测一次当前 IP，失效或明显变慢时立即触发一次小轮次。
+	// 阈值取 100%：健康探针比的是「当前 IP 自己上一轮的时延」，而相邻两次测量之间
+	// 网络抖动就可能超过 20%，阈值太紧会把每个探测周期都误判成变慢、白跑一轮。
+	if d.WatchIntervalSeconds == 0 {
+		d.WatchIntervalSeconds = 60
+	}
+	if d.WatchSwitchPercent == 0 {
+		d.WatchSwitchPercent = 100
+	}
 	if d.TimeoutSeconds <= 0 {
 		d.TimeoutSeconds = 3
 	}
@@ -223,6 +243,10 @@ func applyEnv(c *Config) error {
 		{"HO_SCHEDULE_MINUTES", &d.ScheduleMinutes},
 		{"HO_PROBE_CONCURRENCY", &d.Concurrency},
 		{"HO_DNS_TTL", &d.DNS.TTL},
+		{"HO_PROBE_TOP_N", &d.ProbeTopN},
+		{"HO_PROBE_FULL_EVERY", &d.ProbeFullEvery},
+		{"HO_WATCH_INTERVAL_SECONDS", &d.WatchIntervalSeconds},
+		{"HO_WATCH_SWITCH_PERCENT", &d.WatchSwitchPercent},
 	} {
 		if err := envInt(item.key, item.dst); err != nil {
 			return err
@@ -270,6 +294,18 @@ func validate(c *Config) error {
 	}
 	if d.TimeoutSeconds < 1 || d.TimeoutSeconds > 60 {
 		return fmt.Errorf("timeout_seconds 必须在 1..60，当前 %d", d.TimeoutSeconds)
+	}
+	if d.ProbeTopN < 1 || d.ProbeTopN > 64 {
+		return fmt.Errorf("probe_top_n 必须在 1..64，当前 %d", d.ProbeTopN)
+	}
+	if d.ProbeFullEvery < 1 || d.ProbeFullEvery > 1000 {
+		return fmt.Errorf("probe_full_every 必须在 1..1000，当前 %d", d.ProbeFullEvery)
+	}
+	if d.WatchIntervalSeconds < 5 || d.WatchIntervalSeconds > 3600 {
+		return fmt.Errorf("watch_interval_seconds 必须在 5..3600，当前 %d", d.WatchIntervalSeconds)
+	}
+	if d.WatchSwitchPercent < 1 || d.WatchSwitchPercent > 100 {
+		return fmt.Errorf("watch_switch_percent 必须在 1..100，当前 %d", d.WatchSwitchPercent)
 	}
 	// 验证展开相关配置
 	if d.ExpandConcurrency < 1 || d.ExpandConcurrency > 256 {

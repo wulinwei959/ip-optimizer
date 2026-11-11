@@ -69,7 +69,7 @@ $oldGOOS=$env:GOOS; $oldGOARCH=$env:GOARCH; $oldCGO=$env:CGO_ENABLED; $oldPROXY=
 $env:GOOS='linux'; $env:GOARCH=$GOARCH; $env:CGO_ENABLED='0'; $env:GOPROXY='off'; $env:GOSUMDB='off'
 try {
   Push-Location $CORE_DIR
-  & go build -trimpath -ldflags="-s -w" -o (Join-Path $STG 'app\bin\hosts-optimizer') $GO_PACKAGE
+  & go build -trimpath -ldflags="-s -w -X main.version=$VERSION" -o (Join-Path $STG 'app\bin\hosts-optimizer') $GO_PACKAGE
   if ($LASTEXITCODE -ne 0) { throw 'go build failed' }
 } finally { Pop-Location }
 $env:GOOS=$oldGOOS; $env:GOARCH=$oldGOARCH; $env:CGO_ENABLED=$oldCGO; $env:GOPROXY=$oldPROXY; $env:GOSUMDB=$oldSUM

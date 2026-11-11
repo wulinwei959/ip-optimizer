@@ -75,6 +75,10 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
   - `HO_PORT`、`HO_TZ`、`HO_CA_BUNDLE`
   - `HO_SCHEDULE_MINUTES`（可选覆盖配置）、`HO_PROBE_DNS`、`HO_PROBE_CONCURRENCY`
   - `HO_DNS_LISTEN`、`HO_DNS_TTL`（应答器监听地址与 TTL；前者接受 off 类词表禁用）
+  - `HO_PROBE_TOP_N`、`HO_PROBE_FULL_EVERY`（自适应探测面：常规轮次只测「当前 IP + 前 N 个挑战者」，每 K 轮做一次全量扫描）
+  - `HO_WATCH_INTERVAL_SECONDS`、`HO_WATCH_SWITCH_PERCENT`（健康探针：定期只测当前 IP，失效或明显变慢时触发即时轮次，不用等下一个整轮）
+  - `HO_ADMIN_TOKEN`（管理端点令牌；不设置时每次启动随机生成一个并打印一次到运行日志，填进界面或写进环境变量即可固定）
+- 管理端点（`/api/*`、`/refresh`）需要令牌，订阅端点（`/`、`/hosts.txt`、`/agh.txt`、`/status.json`、`/healthz`）保持开放 —— 否则 AGH 拉不到订阅、用户也进不了界面
 - 非 root 运行：**只做 TCP/TLS 探测，不用 ICMP**
 - 原子写；整轮校验全灭时保留上一轮结果，绝不写空文件；产物至少含 1 条规则
 
