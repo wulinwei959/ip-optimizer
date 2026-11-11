@@ -5,6 +5,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -130,12 +131,17 @@ func Parse(data []byte) (Config, error) {
 }
 
 // Load 每次调用都重新读取 domains.json，因此编辑域名清单后下一轮自动生效，无需重启。
+// 主路径缺失而旧路径（HO_LEGACY_CONFIG）存在时，一次性把旧配置迁移到主路径。
 func Load() (*Runtime, error) {
 	cfgDir := envOr("HO_CONFIG", ".")
 	path := filepath.Join(cfgDir, "domains.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("读取 %s 失败: %w", path, err)
+		if migrated, ok := migrateFromLegacy(cfgDir, path); ok {
+			data = migrated
+		} else {
+			return nil, fmt.Errorf("读取 %s 失败: %w", path, err)
+		}
 	}
 	var c Config
 	if err := json.Unmarshal(data, &c); err != nil {
@@ -158,6 +164,44 @@ func Load() (*Runtime, error) {
 		TZ:        envOr("HO_TZ", "Asia/Shanghai"),
 		CABundle:  envOr("HO_CA_BUNDLE", ""),
 	}, nil
+}
+
+// migrateFromLegacy 处理 domains.json 从旧位置到主位置的一次性迁移：
+// 读取旧文件、原子写回主路径、删除旧文件（完成「移动」），返回旧文件内容供本轮继续使用。
+// 无旧文件可迁移或迁移失败时返回 false，调用方沿用主路径缺失的原始错误。
+func migrateFromLegacy(cfgDir, mainPath string) ([]byte, bool) {
+	legacyDir := strings.TrimSpace(os.Getenv("HO_LEGACY_CONFIG"))
+	if legacyDir == "" {
+		return nil, false
+	}
+	legacyPath := filepath.Join(legacyDir, "domains.json")
+	if legacyPath == mainPath {
+		return nil, false
+	}
+	data, err := os.ReadFile(legacyPath)
+	if err != nil {
+		return nil, false
+	}
+	// 原子写回主路径：先写临时文件再 rename，避免半写状态被读到。
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		log.Printf("配置迁移：创建目录 %s 失败: %v", cfgDir, err)
+		return nil, false
+	}
+	tmp := mainPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		log.Printf("配置迁移：写临时文件失败: %v", err)
+		return nil, false
+	}
+	if err := os.Rename(tmp, mainPath); err != nil {
+		log.Printf("配置迁移：写回主路径失败: %v", err)
+		return nil, false
+	}
+	// 主路径已就位，删除旧文件完成移动；删除失败只记日志，不影响本轮读取。
+	if err := os.Remove(legacyPath); err != nil {
+		log.Printf("配置迁移后删除旧文件失败（可忽略）: %v", err)
+	}
+	log.Printf("配置已迁移：%s → %s", legacyPath, mainPath)
+	return data, true
 }
 
 func applyDefaults(c *Config) {

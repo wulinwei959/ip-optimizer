@@ -21,9 +21,11 @@ mkdir -p "${DATA_DIR}/logs"
 # 所有路径通过 HO_* 注入，不硬编码 /volN。
 # 变量显式写进 SERVICE_COMMAND 而不是只做 export：该命令由平台另起 shell 执行，
 # 显式注入不依赖 service-setup 的 source 作用域（Gopeed 实证也是把一切写进命令）。
+# HO_CONFIG 指向用户可见共享目录根：domains.json 落在这里，可在文件管理器查看/编辑/备份。
+# HO_LEGACY_CONFIG 指向旧配置目录，启动时若主路径缺失则一次性迁移旧 domains.json。
 # 不再注入 HO_CA_BUNDLE：包内不携带 ca-bundle.crt，二进制会回落到系统证书池
 # （已在真机验证可对 github.com / raw.githubusercontent.com 完成 TLS 校验）。
-SERVICE_COMMAND="env HO_CONFIG=${TRIM_PKGETC} HO_OUTPUT=${TRIM_PKGVAR}/output HO_STATE=${TRIM_PKGVAR}/state HO_DATA=${DATA_DIR} HO_PORT=${TRIM_SERVICE_PORT} HO_TZ=Asia/Shanghai ${BIN}"
+SERVICE_COMMAND="env HO_CONFIG=${DATA_DIR} HO_LEGACY_CONFIG=${TRIM_PKGETC} HO_OUTPUT=${TRIM_PKGVAR}/output HO_STATE=${TRIM_PKGVAR}/state HO_DATA=${DATA_DIR} HO_PORT=${TRIM_SERVICE_PORT} HO_TZ=Asia/Shanghai ${BIN}"
 SVC_BACKGROUND=y
 SVC_WRITE_PID=y
 
