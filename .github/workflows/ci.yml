@@ -85,6 +85,13 @@ jobs:
         working-directory: core
         run: |
           file hosts-optimizer-${{ matrix.platform }} | grep -q "statically linked"
+
+      - name: Verify version matches manifest
+        # arm64 二进制无法在 x86 runner 上执行，版本运行校验只对 amd64 做；
+        # 两架构共用同一份 ldflags 注入逻辑，amd64 通过即可代表注入正确。
+        if: matrix.goarch == 'amd64'
+        working-directory: core
+        run: |
           VERSION="$(sed -n 's/^version=//p' ../deploy/fnos-native-fpk/manifest | head -1 | tr -d '[:space:]')"
           got="$(./hosts-optimizer-${{ matrix.platform }} -version | awk '{print $2}')"
           echo "manifest version=$VERSION, binary version=$got"
