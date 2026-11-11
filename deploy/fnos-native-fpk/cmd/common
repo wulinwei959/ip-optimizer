@@ -39,6 +39,8 @@ start_daemon() {
     return 0
   fi
   echo "$(date) start_daemon: process did not stay up" >> "$LOG_FILE"
+  # 生命周期脚本失败必须把清晰的用户可见错误写入 TRIM_TEMP_LOGFILE（官方规范）。
+  echo "服务启动失败，请查看应用运行日志确认原因（${LOG_FILE}）" > "${TRIM_TEMP_LOGFILE:-/dev/null}"
   return 1
 }
 
