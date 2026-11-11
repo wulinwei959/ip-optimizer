@@ -9,6 +9,8 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);max-width:11
 .logo svg{width:100%;height:100%;display:block}
 h1{font-size:26px;font-weight:700;letter-spacing:-.01em;margin:0 0 4px;line-height:1.25}
 .sub{color:var(--muted);font-size:13px;margin:0;line-height:1.5;font-variant-numeric:tabular-nums}
+.update-badge{display:inline-block;margin-top:6px;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600;color:#fff;background:linear-gradient(90deg,#f59e0b,#ef4444);text-decoration:none;cursor:pointer}
+.update-badge:hover{filter:brightness(1.08)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px;margin:16px 0;box-shadow:0 1px 2px rgba(16,24,40,.04)}
 /* 表格必须 fixed 布局：table-cell 的 max-width 会被浏览器忽略，
    长域名会把整列顶宽并与邻列文字重叠。fixed 下 th 的 width 才会真正生效。 */
@@ -303,6 +305,7 @@ a.about-value:hover{text-decoration:underline}
   <div>
     <h1>Hosts 优选订阅</h1>
     <p class="sub">生成于 {{.GeneratedAt}} · 每 {{.ScheduleMinutes}} 分钟轮询 · 有效 {{.ActiveCount}}/{{.DomainCount}} 个域名</p>
+    <span id="updateBadge" class="update-badge" hidden></span>
   </div>
 </header>
 
@@ -728,6 +731,27 @@ a.about-value:hover{text-decoration:underline}
     };
     loadDNS();
     setInterval(loadDNS, 5000);
+  })();
+
+  // 新版本提示徽标：拉取 /healthz（无需令牌），发现新版本时在页头显示，点击跳转发布页。
+  (function () {
+    var badge = document.getElementById("updateBadge");
+    if (!badge) return;
+    function loadUpdate() {
+      fetch("/healthz").then(function (r) { return r.json(); }).then(function (j) {
+        if (j && j.update_available && j.latest_version) {
+          badge.textContent = "发现新版本 " + j.latest_version;
+          badge.hidden = false;
+        } else {
+          badge.hidden = true;
+        }
+      }).catch(function () {});
+    }
+    badge.onclick = function () {
+      window.open("https://github.com/wulinwei959/ip-optimizer/releases/latest", "_blank", "noopener");
+    };
+    loadUpdate();
+    setInterval(loadUpdate, 60000);
   })();
 
   inp.value = location.origin + "/agh.txt";

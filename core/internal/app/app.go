@@ -34,6 +34,7 @@ import (
 	"hosts-optimizer/internal/probe"
 	"hosts-optimizer/internal/store"
 	"hosts-optimizer/internal/ui"
+	"hosts-optimizer/internal/update"
 	"hosts-optimizer/internal/util"
 )
 
@@ -50,6 +51,9 @@ type App struct {
 	// adminToken 是管理端点的访问令牌；为空表示未启用鉴权。
 	adminToken string
 	dataDir    string
+
+	// updateChecker 周期性检查 GitHub 新版本（HO_UPDATE_CHECK=off 可关）。
+	updateChecker *update.Checker
 
 	// 健康探针退避：记录每个域名上次触发即时轮次的时间与退避间隔。
 	watchMu            sync.Mutex
@@ -78,6 +82,7 @@ type App struct {
 	// 异步刷新任务
 	refreshMu   sync.Mutex
 	refreshTask *refreshTask
+	lastRefresh time.Time // 上次手动刷新启动时间，用于限流
 
 	// 子域扩展结果缓存：定时轮次复用 TTL 内的展开结果，避免每轮都重新发现子域名。
 	// 键为主域名名；entry 保存已解析的子域名结果，构建 targets 时仍从当轮 t 取基础参数，
@@ -100,6 +105,10 @@ const (
 	refreshDone    = "done"
 	refreshFailed  = "error"
 )
+
+// refreshMinInterval 是手动刷新的最小间隔，防止连续点击造成探测风暴。
+// 已有任务在跑时直接复用，不受此限制；watchdog 走 doRoundFor 不经过此限流。
+const refreshMinInterval = 10 * time.Second
 
 // refreshTask 保存一次后台刷新任务的状态，供前端轮询进度。
 type refreshTask struct {
@@ -144,21 +153,22 @@ func New(rt *config.Runtime, version string) (*App, error) {
 		log.Printf("历史存储不可用（服务继续运行）: %v", err)
 	}
 	a := &App{
-		port:         rt.Port,
-		configPath:   filepath.Join(rt.ConfigDir, "domains.json"),
-		hostsPath:    filepath.Join(rt.OutputDir, "hosts.txt"),
-		aghPath:      filepath.Join(rt.OutputDir, "agh.txt"),
-		statusPath:   filepath.Join(rt.OutputDir, "status.json"),
-		statePath:    filepath.Join(rt.StateDir, "state.json"),
-		rootCAs:      pool,
-		state:        st,
-		history:      hs,
-		version:      version,
-		adminToken:   resolveAdminToken(rt.DataDir),
-		dataDir:      rt.DataDir,
-		watchStates:  map[string]watchState{},
-		lastSchedule: rt.Config.Defaults.ScheduleMinutes,
-		startedAt:    time.Now(),
+		port:          rt.Port,
+		configPath:    filepath.Join(rt.ConfigDir, "domains.json"),
+		hostsPath:     filepath.Join(rt.OutputDir, "hosts.txt"),
+		aghPath:       filepath.Join(rt.OutputDir, "agh.txt"),
+		statusPath:    filepath.Join(rt.OutputDir, "status.json"),
+		statePath:     filepath.Join(rt.StateDir, "state.json"),
+		rootCAs:       pool,
+		state:         st,
+		history:       hs,
+		version:       version,
+		adminToken:    resolveAdminToken(rt.DataDir),
+		dataDir:       rt.DataDir,
+		watchStates:   map[string]watchState{},
+		lastSchedule:  rt.Config.Defaults.ScheduleMinutes,
+		startedAt:     time.Now(),
+		updateChecker: update.New(version),
 	}
 	// 必须先于 recoverSnapshot：恢复流程会刷新应答视图。
 	a.initDNSServer(rt)
@@ -337,6 +347,8 @@ func (a *App) Run(ctx context.Context) error {
 	a.ensureDNSServerStarted()
 	// 健康探针：定时只测当前 IP，失效/变慢时触发即时轮次，把故障发现延迟降到分钟级。
 	go a.watchLoop(ctx)
+	// 新版本检查：启动后异步查一次 GitHub releases/latest，随后每小时复检。
+	go a.updateChecker.Run(ctx)
 
 	for {
 		select {
@@ -816,7 +828,13 @@ func (a *App) refresh(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	names := normalizeDomainNames(req.Domains)
-	taskID, reused := a.startRefresh(names)
+	taskID, reused, throttled := a.startRefresh(names)
+	if throttled {
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"ok": false, "error": "刷新过于频繁，请 10 秒后再试",
+		})
+		return
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"ok": true, "task_id": taskID, "reused": reused, "domains": names,
 	})
@@ -837,11 +855,15 @@ func normalizeDomainNames(in []string) []string {
 }
 
 // startRefresh 在后台启动一轮探测；已有任务在跑时直接复用，避免重复排队。
-func (a *App) startRefresh(domains []string) (string, bool) {
+// 返回 (taskID, reused, throttled)：throttled=true 表示距上次刷新不足最小间隔，应回 429。
+func (a *App) startRefresh(domains []string) (string, bool, bool) {
 	a.refreshMu.Lock()
 	defer a.refreshMu.Unlock()
 	if a.refreshTask != nil && a.refreshTask.State == refreshRunning {
-		return a.refreshTask.ID, true
+		return a.refreshTask.ID, true, false
+	}
+	if time.Since(a.lastRefresh) < refreshMinInterval {
+		return "", false, true
 	}
 	task := &refreshTask{
 		ID:        fmt.Sprintf("r%d", time.Now().UnixNano()),
@@ -850,8 +872,9 @@ func (a *App) startRefresh(domains []string) (string, bool) {
 		Domains:   domains,
 	}
 	a.refreshTask = task
+	a.lastRefresh = time.Now()
 	go a.runRefresh(task, domains)
-	return task.ID, false
+	return task.ID, false, false
 }
 
 // runRefresh 执行后台轮次并回填任务状态。
@@ -1470,6 +1493,13 @@ func (a *App) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	// 子域扩展缓存命中情况，便于确认缓存是否按预期工作。
 	resp["expand_cache_hits"] = a.expandHits.Load()
 	resp["expand_cache_misses"] = a.expandMisses.Load()
+	// 新版本检查状态（HO_UPDATE_CHECK=off 时 latest 为空、available=false）。
+	latest, available, checkedAt := a.updateChecker.Status()
+	resp["update_available"] = available
+	resp["latest_version"] = latest
+	if !checkedAt.IsZero() {
+		resp["update_checked_at"] = checkedAt.Format(time.RFC3339)
+	}
 	if snap != nil {
 		resp["dns_enabled"] = a.dnsSrv != nil
 		resp["last_round"] = snap.Status.GeneratedAt.Format(time.RFC3339)
