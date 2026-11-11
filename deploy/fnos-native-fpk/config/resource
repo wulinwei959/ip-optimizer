@@ -1,3 +1,10 @@
 {
-  "systemd-unit": {}
+  "systemd-unit": {},
+  "data-share": {
+    "shares": [
+      {
+        "name": "hosts-optimizer/data"
+      }
+    ]
+  }
 }

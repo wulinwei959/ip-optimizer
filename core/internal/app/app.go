@@ -49,6 +49,7 @@ type App struct {
 	version                                   string
 	// adminToken 是管理端点的访问令牌；为空表示未启用鉴权。
 	adminToken string
+	dataDir    string
 
 	// 健康探针退避：记录每个域名上次触发即时轮次的时间与退避间隔。
 	watchMu            sync.Mutex
@@ -137,7 +138,8 @@ func New(rt *config.Runtime, version string) (*App, error) {
 		state:        st,
 		history:      hs,
 		version:      version,
-		adminToken:   resolveAdminToken(),
+		adminToken:   resolveAdminToken(rt.DataDir),
+		dataDir:      rt.DataDir,
 		watchStates:  map[string]watchState{},
 		lastSchedule: rt.Config.Defaults.ScheduleMinutes,
 		startedAt:    time.Now(),
@@ -178,11 +180,22 @@ func buildRootCAs(path string) (*x509.CertPool, error) {
 //
 // 服务默认监听所有网卡（订阅端要被 AGH/局域网访问），但 /api/* 与 /refresh
 // 能改写配置、触发探测、手动换 IP —— 局域网里任何人都能干这些事。
-// 因此未显式设置 HO_ADMIN_TOKEN 时自动生成一个随机令牌并打印一次，
-// 用户把它填进界面（或写进环境变量）后才能操作管理端点。
-func resolveAdminToken() string {
+// 优先级：HO_ADMIN_TOKEN 环境变量 > 数据目录 admin-token 文件 > 新生成。
+// 生成的令牌持久化到数据目录（FPK 下是用户可见的共享文件夹），重启后复用，
+// 用户可在文件管理器里直接查看；无数据目录时退化为每次启动随机生成并打印一次。
+func resolveAdminToken(dataDir string) string {
 	if v := strings.TrimSpace(os.Getenv("HO_ADMIN_TOKEN")); v != "" {
 		return v
+	}
+	tokenPath := ""
+	if dataDir != "" {
+		tokenPath = filepath.Join(dataDir, "admin-token")
+		if data, err := os.ReadFile(tokenPath); err == nil {
+			if tok := strings.TrimSpace(string(data)); tok != "" {
+				log.Printf("管理令牌已从 %s 加载（重启不变）", tokenPath)
+				return tok
+			}
+		}
 	}
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
@@ -190,7 +203,18 @@ func resolveAdminToken() string {
 		return ""
 	}
 	tok := hex.EncodeToString(b)
-	log.Printf("管理令牌（未设置 HO_ADMIN_TOKEN，本次启动自动生成，仅打印一次）: %s", tok)
+	if tokenPath != "" {
+		err := os.MkdirAll(dataDir, 0o755)
+		if err == nil {
+			err = os.WriteFile(tokenPath, []byte(tok+"\n"), 0o600)
+		}
+		if err != nil {
+			log.Printf("管理令牌写入 %s 失败（本次仍可用，重启会重新生成）: %v", tokenPath, err)
+		} else {
+			log.Printf("管理令牌已生成并保存到 %s（文件管理器可见，重启不变）", tokenPath)
+		}
+	}
+	log.Printf("管理令牌（仅本次启动打印一次）: %s", tok)
 	return tok
 }
 
@@ -1350,6 +1374,7 @@ func (a *App) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		"ok":      true,
 		"version": a.version,
 		"uptime":  time.Since(a.startedAt).String(),
+		"data_dir": a.dataDir,
 	}
 	if snap != nil {
 		resp["dns_enabled"] = a.dnsSrv != nil

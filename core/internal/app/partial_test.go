@@ -206,13 +206,34 @@ func TestAdminGuard(t *testing.T) {
 // 未设置 HO_ADMIN_TOKEN 时自动生成；设置了就用配置值。
 func TestResolveAdminToken(t *testing.T) {
 	t.Setenv("HO_ADMIN_TOKEN", "from-env")
-	if got := resolveAdminToken(); got != "from-env" {
+	if got := resolveAdminToken(""); got != "from-env" {
 		t.Fatalf("应使用环境变量，得到 %q", got)
 	}
 	t.Setenv("HO_ADMIN_TOKEN", "   ")
-	tok := resolveAdminToken()
+	tok := resolveAdminToken("")
 	if len(tok) != 48 || strings.ContainsAny(tok, " \t\r\n") {
 		t.Fatalf("自动生成的令牌应为 48 位 hex，得到 %q", tok)
+	}
+}
+
+// 有数据目录时令牌落盘且重启复用；环境变量优先级最高。
+func TestResolveAdminTokenPersists(t *testing.T) {
+	t.Setenv("HO_ADMIN_TOKEN", "")
+	dir := t.TempDir()
+	first := resolveAdminToken(dir)
+	if len(first) != 48 {
+		t.Fatalf("首次应生成 48 位 hex，得到 %q", first)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "admin-token"))
+	if err != nil || strings.TrimSpace(string(data)) != first {
+		t.Fatalf("令牌应落盘到 admin-token，err=%v", err)
+	}
+	if second := resolveAdminToken(dir); second != first {
+		t.Fatalf("重启应复用同一令牌，得到 %q", second)
+	}
+	t.Setenv("HO_ADMIN_TOKEN", "override")
+	if got := resolveAdminToken(dir); got != "override" {
+		t.Fatalf("环境变量应优先，得到 %q", got)
 	}
 }
 

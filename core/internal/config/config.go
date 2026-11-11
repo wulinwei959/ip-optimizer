@@ -71,6 +71,7 @@ type Runtime struct {
 	ConfigDir string
 	OutputDir string
 	StateDir  string
+	DataDir   string
 	Port      string
 	TZ        string
 	CABundle  string
@@ -151,6 +152,7 @@ func Load() (*Runtime, error) {
 		ConfigDir: cfgDir,
 		OutputDir: envOr("HO_OUTPUT", "./output"),
 		StateDir:  envOr("HO_STATE", "./state"),
+		DataDir:   envOr("HO_DATA", ""),
 		Port:      envOr("HO_PORT", "8088"),
 		TZ:        envOr("HO_TZ", "Asia/Shanghai"),
 		CABundle:  envOr("HO_CA_BUNDLE", ""),
