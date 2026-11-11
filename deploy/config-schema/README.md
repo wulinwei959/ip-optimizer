@@ -40,16 +40,21 @@
 | `max_candidates` | int | 64 | 单域名候选上限，防爆量 |
 | `tcp_rounds` | int | 3 | TCP 探测次数，取中位数 |
 | `timeout_seconds` | int | 3 | 单次 DNS / TCP / TLS 超时 |
+| `probe_top_n` | int | 5 | 自适应探测面：常规轮次只测「当前 IP + 前 N 个挑战者」(1..64) |
+| `probe_full_every` | int | 6 | 每 K 轮做一次全量候选扫描 (1..1000) |
+| `watch_interval_seconds` | int | 60 | 健康探针间隔：只测当前生效 IP (5..3600) |
+| `watch_switch_percent` | int | 100 | 当前 IP 相对自身上一轮时延变慢超过该百分比即触发即时轮次 (1..100) |
 | `outputs` | string[] | 三项全开 | 保留字段，当前三项产物固定生成 |
 | `expand_concurrency` | int | 10 | 域名展开并发数 (1..256) |
 | `expand_timeout_seconds` | int | 10 | 域名展开单次超时 (1..60) |
 | `expand_max_subdomains` | int | 50 | 域名展开最大子域名数 (1..1000) |
 | `expand_sources` | string[] | ["wordlist", "rules"] | 全局默认展开来源 |
+| `expand_cache_ttl_hours` | int | 12 | 子域扩展结果缓存 TTL (1..240 小时)；定时轮次复用，手动整轮刷新强制重新展开 |
 | `history_retention_months` | int | 12 | 探测历史保留月数 (1..120)，过期分片自动清理 |
-| `dns.listen` | string | `127.0.0.1:18053` | 内置 DNS 应答器的 UDP 监听地址 `host:port`；空字符串禁用。填 `off` / `disabled` / `none` / `0` / `false` 也表示禁用。host 必须是 IP 字面量，留空表示监听全部接口 |
+| `dns.listen` | string | `127.0.0.1:18053` | 内置 DNS 应答器监听地址 `host:port`（UDP 与 TCP 同端口）；空字符串禁用。填 `off` / `disabled` / `none` / `0` / `false` 也表示禁用。host 必须是 IP 字面量，留空表示监听全部接口 |
 | `dns.ttl` | int | 60 | 应答给 A 记录的 TTL 秒数 (5..3600)，决定 IP 切换的收敛上限 |
 
-`HO_SCHEDULE_MINUTES`、`HO_PROBE_DNS`、`HO_PROBE_CONCURRENCY` 可覆盖 `defaults`；另有 `HO_DNS_LISTEN` 与 `HO_DNS_TTL` 可覆盖应答器配置（前者同样接受 off 类词表禁用）。`HO_PORT` / `HO_TZ` / `HO_CA_BUNDLE` / `HO_CONFIG` / `HO_OUTPUT` / `HO_STATE` 见 `deploy/README.md`。
+`HO_SCHEDULE_MINUTES`、`HO_PROBE_DNS`、`HO_PROBE_CONCURRENCY`、`HO_PROBE_TOP_N`、`HO_PROBE_FULL_EVERY`、`HO_WATCH_INTERVAL_SECONDS`、`HO_WATCH_SWITCH_PERCENT`、`HO_EXPAND_CACHE_TTL_HOURS` 可覆盖 `defaults`；另有 `HO_DNS_LISTEN` 与 `HO_DNS_TTL` 可覆盖应答器配置（前者同样接受 off 类词表禁用）。`HO_PORT` / `HO_TZ` / `HO_CA_BUNDLE` / `HO_CONFIG` / `HO_LEGACY_CONFIG` / `HO_OUTPUT` / `HO_STATE` / `HO_DATA` / `HO_ADMIN_TOKEN` / `HO_UPDATE_CHECK` 见 `deploy/README.md` 与根 README。
 
 ## HTTP 端点（管理接口）
 
@@ -134,8 +139,8 @@ AdGuard Home 的过滤器订阅刷新间隔**最低只能设 1 小时**，而 `$
 
 ## 手动编辑域名清单
 
-1. **SSH 编辑**（目前最稳）：`/var/apps/hosts-optimizer-native/etc/domains.json`，保存后 `POST /refresh` 即时生效
-2. **共享目录**：在 `config/resource` 加 `data-share`，让用户在群晖文件管理器中编辑；需验证 `TRIM_DATA_SHARE_PATHS` 挂载目录，目前未启用
+1. **共享目录（1.4.0 起，推荐）**：文件管理器「应用文件」→ hosts-optimizer → data → `domains.json`，可直接查看/编辑/备份；保存后 `POST /refresh` 即时生效。旧位置 `@appconf` 的配置在升级后启动时自动一次性迁移到这里。
+2. **SSH 编辑**：共享目录实际路径 `/vol1/@appshare/hosts-optimizer/data/domains.json`（`TRIM_DATA_SHARE_PATHS` 首段），保存后 `POST /refresh` 即时生效
 3. **Web 编辑页面**：管理界面与订阅端点共用同一 HTTP 服务；「编辑域名清单」默认是图形化表单，可直接修改轮询周期、DNS、并发、超时、滞回与子域名展开参数，也可增删域名或打开单域名高级项；需要时切到 JSON 源码。上方域名发现工具支持输入主域名后勾选批量添加，状态表按主域名分组并支持整组勾选/批量删除
 
    DNS 应答器的 `defaults.dns.listen` / `defaults.dns.ttl`、`defaults.expect_status`、`defaults.outputs` 以及域名级的 `expect_status` / `allow_private` / `suppress_aaaa` 都可在表单内直接填写；数值字段已带范围校验，off 类词表（`off` / `disabled` / `none` / `0` / `false`）可直接填在监听地址里禁用应答器。

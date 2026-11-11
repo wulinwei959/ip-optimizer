@@ -14,7 +14,7 @@
 
 仓库：<https://github.com/wulinwei959/ip-optimizer>
 
-当前版本：**1.1.0**（版本历史与验证记录见 [`docs/progress.md`](docs/progress.md)）
+当前版本：**1.4.0**（版本历史与验证记录见 [`docs/progress.md`](docs/progress.md)）
 
 ---
 
@@ -77,6 +77,12 @@ AdGuard Home 订阅
 - **AGH 规则刷新**：「刷新 AGH 规则」按钮只根据当前快照重新生成 `agh.txt`，不重新探测 DNS/TCP；手动刷新选中域名或切换 IP 后也会自动同步订阅文件。
 - **异步刷新**：`POST /refresh` 立即返回 `task_id` 并在后台执行，页面轮询 `/api/refresh-status` 显示进度，长时间探测不再阻塞请求。
 - **fnOS 桌面入口**：桌面图标以 iframe 窗口打开状态页，可查看生效 IP / 延迟、复制订阅地址、刷新选中域名或单独重写 AGH 规则；表格支持勾选与批量操作。
+- **管理令牌鉴权**：管理端点需令牌，令牌持久化到用户可见共享目录 `admin-token`（重启复用），页面顶部填入即可；`HO_ADMIN_TOKEN` 可固定覆盖。
+- **用户可见数据目录**：配置、令牌、运行日志都落在文件管理器「应用文件」可见的共享文件夹，便于查看、编辑与备份；升级时旧配置自动一次性迁移，不丢域名。
+- **DNS 应答器 TCP**：与 UDP 同端口监听 TCP（RFC 1035 长度前缀），供不支持纯 UDP 的解析器回退；语义与计数和 UDP 一致。
+- **子域扩展缓存**：子域名发现结果按 TTL（默认 12 小时）缓存，定时轮次复用、手动刷新强制重新发现，显著降低重复发现开销。
+- **健康探针与自适应探测**：独立探针分钟级发现失效/变慢的当前 IP 并触发即时轮次；常规轮次只测「当前 IP + Top-N 挑战者」，周期性全量扫描，整轮共用并发池。
+- **刷新限流与新版本提示**：手动刷新 10 秒最小间隔（超出 429）；启动后异步检查 GitHub 新版本，`/healthz` 与页头徽标提示「发现新版本 X」（`HO_UPDATE_CHECK=off` 可关）。
 
 ---
 
@@ -106,7 +112,7 @@ AdGuard Home 订阅
    ```
 
    `agh.txt` 使用 `||domain^$dnsrewrite=NOERROR;A;IP`，覆盖子域且让 AAAA 天然返回 NODATA（详见下方「已查证的坑」）。**该方式与上面的 DNS 应答器二选一，不要同时启用。**
-6. **配置域名**：打开状态页，在「编辑域名清单」的图形化表单里调整参数或增删域名；也可输入主域名点「获取域名列表」，勾选后批量添加，最后点「保存并生效」。需要直接改 JSON 时切换到「JSON 源码」，或编辑 `/var/apps/hosts-optimizer-native/etc/domains.json`。
+6. **配置域名**：打开状态页，在「编辑域名清单」的图形化表单里调整参数或增删域名；也可输入主域名点「获取域名列表」，勾选后批量添加，最后点「保存并生效」。需要直接改 JSON 时切换到「JSON 源码」，或编辑共享目录里的 `domains.json`（文件管理器「应用文件」→ hosts-optimizer → data）。
 
 > 若用 HTTPS 访问飞牛桌面，iframe 加载 `http://...:18088` 可能被浏览器按混合内容拦截，表现为窗口空白。此时改用浏览器直接访问 `http://<NAS_IP>:18088/`，或把 `app/ui/config` 的 `type` 改为 `url`。
 
@@ -177,15 +183,22 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `HO_CONFIG` | `.` | 配置**目录**，内含 `domains.json`；FPK 注入 `$TRIM_PKGETC` |
+| `HO_CONFIG` | `.` | 配置**目录**，内含 `domains.json`；FPK 注入共享目录 `${DATA_DIR}`（1.4.0 起） |
+| `HO_LEGACY_CONFIG` | 空 | 旧配置目录；主路径缺 `domains.json` 时从此一次性迁移（FPK 注入 `$TRIM_PKGETC`） |
 | `HO_OUTPUT` | `./output` | 产物目录；FPK 注入 `$TRIM_PKGVAR/output` |
 | `HO_STATE` | `./state` | 状态/历史目录；FPK 注入 `$TRIM_PKGVAR/state` |
+| `HO_DATA` | 空 | 用户可见数据目录（FPK 共享文件夹）；令牌与日志落盘于此 |
 | `HO_PORT` | `8088` | 监听端口；FPK 注入 `$TRIM_SERVICE_PORT`（`18088`） |
 | `HO_TZ` | `Asia/Shanghai` | 时区，静态二进制自带 tzdata，不依赖宿主 `/usr/share/zoneinfo` |
 | `HO_CA_BUNDLE` | 空 | 可选 CA 证书文件；**文件不存在时降级为仅用系统证书池，不是致命错误** |
+| `HO_ADMIN_TOKEN` | 空 | 固定管理令牌；未设则读共享目录 `admin-token`，再无则生成并持久化 |
 | `HO_SCHEDULE_MINUTES` | — | 覆盖 `defaults.schedule_minutes` |
 | `HO_PROBE_DNS` | — | 覆盖上游 DNS，逗号分隔；UDP 用字面 IP，也可写 `tls://` / `https://` |
 | `HO_PROBE_CONCURRENCY` | — | 覆盖 `defaults.concurrency` |
+| `HO_PROBE_TOP_N` / `HO_PROBE_FULL_EVERY` | — | 自适应探测面：常规轮次挑战者数 / 每 K 轮全量扫描 |
+| `HO_WATCH_INTERVAL_SECONDS` / `HO_WATCH_SWITCH_PERCENT` | — | 健康探针间隔 / 变慢触发阈值 |
+| `HO_EXPAND_CACHE_TTL_HOURS` | `12` | 子域扩展缓存 TTL（1..240 小时） |
+| `HO_UPDATE_CHECK` | 开 | 填 `off` 关闭 GitHub 新版本检查 |
 | `HO_DNS_LISTEN` | — | 覆盖 `defaults.dns.listen`；填 off 类词表（`off` / `disabled` / `none` / `0` / `false`）禁用应答器 |
 | `HO_DNS_TTL` | — | 覆盖 `defaults.dns.ttl` |
 
@@ -232,8 +245,11 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 | `PUT /api/domains` | 校验并原子写回 `domains.json`（要求 `Content-Type: application/json`） |
 | `POST /api/expand` | 按需发现主域名的相关子域名，返回解析结果（不修改配置） |
 | `GET /api/dns` | 应答器状态：`enabled` / `listen` / `addr` / `ttl` / 运行计数 / `agh_upstream` 分流规则 |
+| `GET /healthz` | 健康探针：版本、运行时长、`data_dir`、扩展缓存命中、`update_available` / `latest_version`、watchdog 统计（无需令牌） |
 
 文本端点返回 `ETag` / `Last-Modified`，支持 `If-None-Match` → 304。
+
+> **管理鉴权（1.2.0 起）**：`/api/*` 与 `/refresh` 需令牌（`X-Admin-Token` 头 / Bearer / `?token=`）。令牌在共享目录 `admin-token` 文件（文件管理器可见，重启不变），把它填进页面顶部输入框即可；`HO_ADMIN_TOKEN` 可固定覆盖。订阅端点与 `/healthz` 无需令牌。`POST /refresh` 有 10 秒最小间隔（超出返回 429），手动整轮刷新会强制重新展开子域名。
 
 ---
 
@@ -276,7 +292,9 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 
 运行时数据（fnOS 原生包）：
 
-- 配置：`/vol1/@appconf/hosts-optimizer-native/domains.json`
+- 配置：`/vol1/@appshare/hosts-optimizer/data/domains.json`（1.4.0 起，文件管理器「应用文件」可见；旧位置 `@appconf` 启动时自动迁移）
+- 管理令牌：`/vol1/@appshare/hosts-optimizer/data/admin-token`（重启复用）
+- 运行日志：`/vol1/@appshare/hosts-optimizer/data/logs/app.log`（8MB 轮转）
 - 产物：`/vol1/@appdata/hosts-optimizer-native/output/`
 - 状态与历史：`/vol1/@appdata/hosts-optimizer-native/state/`（`state.json` + `history/rounds-YYYYMM.jsonl.gz`）
 
