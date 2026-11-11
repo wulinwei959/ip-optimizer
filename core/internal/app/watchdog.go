@@ -113,7 +113,8 @@ func (a *App) watchOnce(ctx context.Context, rt *config.Runtime, interval time.D
 	sort.Strings(names)
 
 	// 与定时轮次共用 roundMu：不会并发探测，也不会与 /refresh 打架。
-	if _, err := a.doRoundFor(ctx, only); err != nil {
+	// forceExpand=false：定向轮次本就不展开子域名，缓存与否无关。
+	if _, err := a.doRoundFor(ctx, only, false); err != nil {
 		log.Printf("健康探针触发的轮次失败（%s）: %v", strings.Join(names, ","), err)
 		return
 	}

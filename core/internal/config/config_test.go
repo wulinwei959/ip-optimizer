@@ -112,3 +112,39 @@ func TestLoadMissingFile(t *testing.T) {
 		t.Fatal("配置文件缺失时应返回错误")
 	}
 }
+
+// TestExpandCacheTTL 验证子域扩展缓存 TTL 的默认值、环境变量覆盖与校验边界。
+func TestExpandCacheTTL(t *testing.T) {
+	c := Config{}
+	applyDefaults(&c)
+	if c.Defaults.ExpandCacheTTLHours != 12 {
+		t.Fatalf("默认 TTL 应为 12 小时，实际 %d", c.Defaults.ExpandCacheTTLHours)
+	}
+
+	t.Setenv("HO_EXPAND_CACHE_TTL_HOURS", "48")
+	c2 := Config{}
+	applyDefaults(&c2)
+	if err := applyEnv(&c2); err != nil {
+		t.Fatalf("applyEnv 失败: %v", err)
+	}
+	if c2.Defaults.ExpandCacheTTLHours != 48 {
+		t.Fatalf("HO_EXPAND_CACHE_TTL_HOURS 应覆盖为 48，实际 %d", c2.Defaults.ExpandCacheTTLHours)
+	}
+
+	// applyDefaults 会把 0 归一化为默认 12，故只有越界值（>240）应被拒绝。
+	bad := Config{Defaults: Defaults{ExpandCacheTTLHours: 241}}
+	applyDefaults(&bad)
+	if err := validate(&bad); err == nil {
+		t.Fatal("TTL=241 应被拒绝")
+	}
+	zero := Config{Defaults: Defaults{ExpandCacheTTLHours: 0}}
+	applyDefaults(&zero)
+	if err := validate(&zero); err != nil {
+		t.Fatalf("TTL=0 应归一化为默认并合法，实际 %v", err)
+	}
+	ok := Config{Defaults: Defaults{ExpandCacheTTLHours: 240}}
+	applyDefaults(&ok)
+	if err := validate(&ok); err != nil {
+		t.Fatalf("TTL=240 应合法，实际 %v", err)
+	}
+}

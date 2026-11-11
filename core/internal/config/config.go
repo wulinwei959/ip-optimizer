@@ -55,6 +55,7 @@ type Defaults struct {
 	ExpandTimeoutSeconds   int       `json:"expand_timeout_seconds"`
 	ExpandMaxSubdomains    int       `json:"expand_max_subdomains"`
 	ExpandSources          []string  `json:"expand_sources"`
+	ExpandCacheTTLHours    int       `json:"expand_cache_ttl_hours"`
 	HistoryRetentionMonths int       `json:"history_retention_months"`
 	DNS                    DNSConfig `json:"dns"`
 }
@@ -220,6 +221,9 @@ func applyDefaults(c *Config) {
 	if len(d.ExpandSources) == 0 {
 		d.ExpandSources = []string{"wordlist", "rules"}
 	}
+	if d.ExpandCacheTTLHours <= 0 {
+		d.ExpandCacheTTLHours = 12
+	}
 	if d.HistoryRetentionMonths <= 0 {
 		d.HistoryRetentionMonths = 12
 	}
@@ -249,6 +253,7 @@ func applyEnv(c *Config) error {
 		{"HO_PROBE_FULL_EVERY", &d.ProbeFullEvery},
 		{"HO_WATCH_INTERVAL_SECONDS", &d.WatchIntervalSeconds},
 		{"HO_WATCH_SWITCH_PERCENT", &d.WatchSwitchPercent},
+		{"HO_EXPAND_CACHE_TTL_HOURS", &d.ExpandCacheTTLHours},
 	} {
 		if err := envInt(item.key, item.dst); err != nil {
 			return err
@@ -318,6 +323,9 @@ func validate(c *Config) error {
 	}
 	if d.ExpandMaxSubdomains < 1 || d.ExpandMaxSubdomains > 1000 {
 		return fmt.Errorf("expand_max_subdomains 必须在 1..1000，当前 %d", d.ExpandMaxSubdomains)
+	}
+	if d.ExpandCacheTTLHours < 1 || d.ExpandCacheTTLHours > 240 {
+		return fmt.Errorf("expand_cache_ttl_hours 必须在 1..240，当前 %d", d.ExpandCacheTTLHours)
 	}
 	if d.HistoryRetentionMonths < 1 || d.HistoryRetentionMonths > 120 {
 		return fmt.Errorf("history_retention_months 必须在 1..120，当前 %d", d.HistoryRetentionMonths)

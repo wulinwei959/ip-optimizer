@@ -79,6 +79,14 @@ type App struct {
 	refreshMu   sync.Mutex
 	refreshTask *refreshTask
 
+	// 子域扩展结果缓存：定时轮次复用 TTL 内的展开结果，避免每轮都重新发现子域名。
+	// 键为主域名名；entry 保存已解析的子域名结果，构建 targets 时仍从当轮 t 取基础参数，
+	// 避免缓存命中时沿用过期的 SNI/端口等配置。
+	expandCacheMu sync.Mutex
+	expandCache   map[string]expandCacheEntry
+	expandHits    atomic.Uint64
+	expandMisses  atomic.Uint64
+
 	// DNS 应答器生命周期：监听地址变更时需要重绑，故保存根 ctx 与取消函数。
 	dnsBaseCtx context.Context
 	dnsCancel  context.CancelFunc
@@ -102,6 +110,14 @@ type refreshTask struct {
 	NextRoundMinutes int        `json:"next_round_minutes,omitempty"`
 	Domains          []string   `json:"domains,omitempty"`
 	Error            string     `json:"error,omitempty"`
+}
+
+// expandCacheEntry 缓存一次域名展开的已解析子域名结果。
+// fingerprint 记录影响展开结果的参数，任一变化都会让该条缓存失效。
+type expandCacheEntry struct {
+	fingerprint string
+	results     []expand.Result
+	savedAt     time.Time
 }
 
 // New 初始化目录、CA 池、状态，并尝试从磁盘恢复上一轮产物。
@@ -348,15 +364,16 @@ func (a *App) Run(ctx context.Context) error {
 	}
 }
 
-// doRound 执行一轮全量探测。
+// doRound 执行一轮全量探测（定时轮次，复用子域扩展缓存）。
 func (a *App) doRound(ctx context.Context) (int, error) {
-	return a.doRoundFor(ctx, nil)
+	return a.doRoundFor(ctx, nil, false)
 }
 
 // doRoundFor 执行一轮；only 非空时只刷新指定域名，并把结果合并回现有快照。
+// forceExpand 为真时整轮强制重新展开子域名（手动 /refresh 语义：用户主动刷新视为要最新发现）。
 // roundMu 保证定时器与 /refresh 不会并发探测。
 // 每轮重新读取 domains.json，因此手动增删域名后下一轮自动生效，无需重启。
-func (a *App) doRoundFor(ctx context.Context, only map[string]bool) (int, error) {
+func (a *App) doRoundFor(ctx context.Context, only map[string]bool, forceExpand bool) (int, error) {
 	a.roundMu.Lock()
 	defer a.roundMu.Unlock()
 
@@ -396,7 +413,7 @@ func (a *App) doRoundFor(ctx context.Context, only map[string]bool) (int, error)
 			if !t.Expand {
 				continue
 			}
-			for _, sub := range a.expandSubdomains(ctx, t, d) {
+			for _, sub := range a.expandSubdomains(ctx, t, d, forceExpand) {
 				if seen[sub.Name] {
 					continue
 				}
@@ -843,13 +860,14 @@ func (a *App) runRefresh(task *refreshTask, domains []string) {
 	var minutes int
 	var err error
 	if len(domains) == 0 {
-		minutes, err = a.doRound(context.Background())
+		// 手动整轮刷新视为用户要最新发现：强制重新展开子域名，绕过 TTL 缓存。
+		minutes, err = a.doRoundFor(context.Background(), nil, true)
 	} else {
 		only := make(map[string]bool, len(domains))
 		for _, name := range domains {
 			only[name] = true
 		}
-		minutes, err = a.doRoundFor(context.Background(), only)
+		minutes, err = a.doRoundFor(context.Background(), only, false)
 	}
 	if err == nil {
 		if n, aghErr := a.rebuildAGH(time.Now()); aghErr != nil {
@@ -970,7 +988,11 @@ func (a *App) handleDomainsConfig(w http.ResponseWriter, r *http.Request) {
 
 // expandSubdomains 对开启 expand 的主域名做一次发现，把可解析的子域名转成待探测目标。
 // 展开失败只记录日志并跳过，不影响本轮其余域名。
-func (a *App) expandSubdomains(ctx context.Context, t config.Target, d config.Defaults) []config.Target {
+//
+// 缓存语义：非强制刷新时先查缓存，TTL 内命中直接复用；展开成功且非空才写缓存，
+// 失败或结果为空不写。forceRefresh（手动 /refresh 整轮）绕过缓存并清掉该域名的旧条目，
+// 保证用户主动刷新拿到的是最新发现。
+func (a *App) expandSubdomains(ctx context.Context, t config.Target, d config.Defaults, forceRefresh bool) []config.Target {
 	sources, err := parseExpandSources(t.ExpandSources)
 	if err != nil {
 		log.Printf("[%s] 展开来源配置非法，已跳过: %v", t.Name, err)
@@ -980,20 +1002,42 @@ func (a *App) expandSubdomains(ctx context.Context, t config.Target, d config.De
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
-	expander := expand.New(expand.Options{
+	opts := expand.Options{
 		Sources:       sources,
 		Concurrency:   t.ExpandConcurrency,
 		Timeout:       timeout,
 		MaxSubdomains: t.ExpandMaxSubdomains,
 		ProbeDNS:      d.ProbeDNS,
-	})
+	}
+
+	if forceRefresh {
+		a.expandCacheEvict(t.Name)
+	} else if results, ok := a.expandCacheGet(t.Name, opts, d.ExpandCacheTTLHours); ok {
+		subs := buildSubTargets(t, results)
+		if len(subs) > 0 {
+			log.Printf("[%s] 子域展开命中缓存：%d 个子域名复用", t.Name, len(subs))
+		}
+		return subs
+	}
+
 	expandCtx, cancel := context.WithTimeout(ctx, timeout+timeout/2)
 	defer cancel()
-	results, err := expander.Expand(expandCtx, t.Name)
+	results, err := expand.New(opts).Expand(expandCtx, t.Name)
 	if err != nil {
 		log.Printf("[%s] 域名展开失败: %v", t.Name, err)
 		return nil
 	}
+	subs := buildSubTargets(t, results)
+	if len(subs) > 0 {
+		a.expandCachePut(t.Name, opts, results)
+		log.Printf("[%s] 域名展开：%d 个子域名可解析", t.Name, len(subs))
+	}
+	return subs
+}
+
+// buildSubTargets 把展开结果里的可解析子域名转成待探测目标。
+// 基础参数（端口/SNI/期望状态等）始终取当轮 t，缓存命中时也不会沿用过期配置。
+func buildSubTargets(t config.Target, results []expand.Result) []config.Target {
 	subs := make([]config.Target, 0, len(results))
 	for _, r := range results {
 		if !r.Resolved || len(r.IPs) == 0 {
@@ -1006,10 +1050,57 @@ func (a *App) expandSubdomains(ctx context.Context, t config.Target, d config.De
 		sub.Expand = false
 		subs = append(subs, sub)
 	}
-	if len(subs) > 0 {
-		log.Printf("[%s] 域名展开：%d 个子域名可解析", t.Name, len(subs))
-	}
 	return subs
+}
+
+// expandFingerprint 计算影响展开结果的参数指纹：来源、并发、子域上限、探测 DNS 任一变化
+// 都会让缓存条目失效，避免配置改了仍复用旧结果。
+func expandFingerprint(o expand.Options) string {
+	srcs := append([]expand.Source(nil), o.Sources...)
+	sort.Slice(srcs, func(i, j int) bool { return srcs[i] < srcs[j] })
+	return fmt.Sprintf("%v|%d|%d|%v", srcs, o.Concurrency, o.MaxSubdomains, o.ProbeDNS)
+}
+
+// expandCacheGet 命中返回缓存的子域名结果；未命中/过期/指纹不符返回 false 并计 miss。
+func (a *App) expandCacheGet(domain string, o expand.Options, ttlHours int) ([]expand.Result, bool) {
+	a.expandCacheMu.Lock()
+	defer a.expandCacheMu.Unlock()
+	if a.expandCache == nil {
+		a.expandMisses.Add(1)
+		return nil, false
+	}
+	e, ok := a.expandCache[domain]
+	if !ok || e.fingerprint != expandFingerprint(o) {
+		a.expandMisses.Add(1)
+		return nil, false
+	}
+	if ttlHours > 0 && time.Since(e.savedAt) >= time.Duration(ttlHours)*time.Hour {
+		a.expandMisses.Add(1)
+		return nil, false
+	}
+	a.expandHits.Add(1)
+	return e.results, true
+}
+
+// expandCachePut 写入/刷新一条缓存。结果按「展开器返回顺序」保存，不做子域去重以外的处理。
+func (a *App) expandCachePut(domain string, o expand.Options, results []expand.Result) {
+	a.expandCacheMu.Lock()
+	defer a.expandCacheMu.Unlock()
+	if a.expandCache == nil {
+		a.expandCache = map[string]expandCacheEntry{}
+	}
+	a.expandCache[domain] = expandCacheEntry{
+		fingerprint: expandFingerprint(o),
+		results:     results,
+		savedAt:     time.Now(),
+	}
+}
+
+// expandCacheEvict 删除某域名的缓存条目（手动刷新强制重展开时调用）。
+func (a *App) expandCacheEvict(domain string) {
+	a.expandCacheMu.Lock()
+	defer a.expandCacheMu.Unlock()
+	delete(a.expandCache, domain)
 }
 
 // handleExpand 按需展开主域名，返回发现的子域名及其解析结果。
@@ -1371,11 +1462,14 @@ func (a *App) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	snap := a.snap
 	a.mu.RUnlock()
 	resp := map[string]any{
-		"ok":      true,
-		"version": a.version,
-		"uptime":  time.Since(a.startedAt).String(),
+		"ok":       true,
+		"version":  a.version,
+		"uptime":   time.Since(a.startedAt).String(),
 		"data_dir": a.dataDir,
 	}
+	// 子域扩展缓存命中情况，便于确认缓存是否按预期工作。
+	resp["expand_cache_hits"] = a.expandHits.Load()
+	resp["expand_cache_misses"] = a.expandMisses.Load()
 	if snap != nil {
 		resp["dns_enabled"] = a.dnsSrv != nil
 		resp["last_round"] = snap.Status.GeneratedAt.Format(time.RFC3339)
