@@ -176,6 +176,8 @@ td.cell-ops .badge{flex:0 1 auto;min-width:0;max-width:8em;overflow:hidden;text-
 .group-select{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);cursor:pointer;white-space:nowrap}
 .group-select input{width:15px;height:15px;accent-color:var(--accent);margin:0}
 tr.domain-row td{background:#fff}
+tr.domain-row.row-disabled td{opacity:.55}
+tr.domain-row.row-disabled .cell-name{text-decoration:line-through}
 tr.domain-row td:nth-child(2){padding-left:32px}
 @media (max-width:768px){
   body{padding:18px 12px 40px}
@@ -1466,13 +1468,39 @@ a.about-value:hover{text-decoration:underline}
           groupDisable.disabled = false;
           if (ok) {
             msg.textContent = (wantDisabled ? "已禁用 " : "已启用 ") + names.length + " 个域名";
-            setTimeout(function () { location.reload(); }, 600);
+            g.rows.forEach(function (tr) { setRowDisabled(tr, wantDisabled); });
+            applyFilter();
           } else {
             groupDisable.checked = !wantDisabled;
           }
         });
       };
     });
+  }
+
+  // 禁用/启用原地更新行：不重载页面、不收起分组，
+  // 视图不受任何环境（含 localStorage 不可用）影响。
+  function setRowDisabled(tr, disabled) {
+    if (!tr) return;
+    var dis = disabled ? "true" : "false";
+    if (tr.dataset.disabled === dis) return;
+    tr.dataset.disabled = dis;
+    tr.classList.toggle("row-disabled", disabled);
+    var statusTd = tr.children[4];
+    if (statusTd) {
+      if (disabled) {
+        statusTd.innerHTML = '<span class="status-dot status-unknown"></span>已禁用';
+      } else {
+        var pend = tr.dataset.pending === "true";
+        var ok = tr.dataset.status === "true";
+        statusTd.innerHTML = '<span class="status-dot ' + (ok ? "status-ok" : "status-fail") + '"></span>' + (pend ? "待探测" : (ok ? "正常" : "失败"));
+      }
+    }
+    var btn = tr.querySelector(".disable-btn");
+    if (btn) {
+      btn.dataset.disabled = dis;
+      btn.textContent = disabled ? "启用" : "禁用";
+    }
   }
 
   function applyFilter() {
@@ -1513,7 +1541,9 @@ a.about-value:hover{text-decoration:underline}
       g.rows.forEach(function (tr) {
         tr.classList.toggle("table-row-hidden", !g.open || visible.indexOf(tr) < 0);
       });
-      var okCount = visible.filter(function (tr) { return tr.dataset.status === "true"; }).length;
+      var okCount = visible.filter(function (tr) {
+        return tr.dataset.status === "true" && tr.dataset.disabled !== "true";
+      }).length;
       g.count.textContent = visible.length + " 个域名";
       g.ok.textContent = okCount + " 正常";
       g.ok.className = "group-ok" + (visible.length - okCount > 0 ? " has-bad" : "");
@@ -1562,7 +1592,8 @@ a.about-value:hover{text-decoration:underline}
         btn.disabled = false;
         if (ok) {
           msg.textContent = (wantDisabled ? "已禁用 " : "已启用 ") + name;
-          setTimeout(function () { location.reload(); }, 600);
+          setRowDisabled(btn.closest("tr"), wantDisabled);
+          applyFilter();
         }
       });
     };
