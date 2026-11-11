@@ -15,6 +15,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"strings"
@@ -46,6 +47,11 @@ const (
 	// 超过上限就在读循环里直接处理（背压），而不是继续开 goroutine：
 	// 内网里有人拿这个端口做压力测试时，不会把进程撑爆。
 	maxConcurrentPackets = 256
+
+	// TCP DNS 帧上限与读写超时（RFC 1035 TCP 帧：2 字节长度前缀 + 报文）。
+	maxTCPFrame     = 4096
+	tcpIdleTimeout  = 30 * time.Second // 空闲连接读超时，避免慢客户端长期占 goroutine
+	tcpWriteTimeout = 5 * time.Second  // 单次写超时
 )
 
 // Record 是一条应答记录。Name 必须为规范化小写且无尾点；
@@ -213,7 +219,8 @@ func (s *Server) Stats() Stats {
 	}
 }
 
-// Serve 监听并应答，直到 ctx 取消。监听失败属致命错误，直接返回。
+// Serve 监听 UDP 与 TCP 并应答，直到 ctx 取消。UDP 监听失败属致命错误，直接返回。
+// TCP 监听失败仅记日志并继续 UDP（TCP 是部分解析器的回退通道，非主路径）。
 // nil 接收者为 no-op。
 func (s *Server) Serve(ctx context.Context) error {
 	if s == nil {
@@ -228,13 +235,25 @@ func (s *Server) Serve(ctx context.Context) error {
 		return fmt.Errorf("监听 DNS %s 失败: %w", s.listen, err)
 	}
 	s.conn.Store(conn)
-	s.started.Store(true)
 	defer func() {
 		s.started.Store(false)
 		_ = conn.Close()
 	}()
 
-	// ctx 取消时必须主动关闭 socket，否则 ReadFromUDP 会永久阻塞，
+	// TCP 监听：与 UDP 同地址同端口，供不支持纯 UDP 的解析器回退。失败不致命。
+	// 端口 0 场景下 UDP 已拿到真实端口，TCP 必须复用它，否则会各占一个临时端口。
+	tcpListen := tcpAddrFor(addr, conn.LocalAddr().(*net.UDPAddr).Port)
+	tcpListener, err := net.Listen("tcp", tcpListen)
+	if err != nil {
+		log.Printf("[dnsserver] TCP 监听 %s 失败，仅使用 UDP: %v", tcpListen, err)
+	} else {
+		defer tcpListener.Close()
+	}
+
+	// 两个 socket 都绑定完成后才置 Started，避免调用方在 TCP 尚未监听时就连上来。
+	s.started.Store(true)
+
+	// ctx 取消时必须主动关闭 socket，否则 ReadFromUDP / Accept 会永久阻塞，
 	// 既泄漏 goroutine，也会让端口一直占用导致换绑失败。
 	stopWatch := make(chan struct{})
 	defer close(stopWatch)
@@ -242,6 +261,9 @@ func (s *Server) Serve(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			_ = conn.Close()
+			if tcpListener != nil {
+				_ = tcpListener.Close()
+			}
 		case <-stopWatch:
 		}
 	}()
@@ -249,12 +271,35 @@ func (s *Server) Serve(ctx context.Context) error {
 	// 并发上限：应答器被内网打满时不至于无限起 goroutine。
 	// 超过上限就在读循环里直接处理（背压），而不是继续开 goroutine。
 	sem := make(chan struct{}, maxConcurrentPackets)
+
+	udpDone := make(chan struct{})
+	go func() {
+		defer close(udpDone)
+		s.serveUDP(ctx, conn, sem)
+	}()
+	if tcpListener != nil {
+		go s.serveTCP(ctx, tcpListener, sem)
+	}
+	<-udpDone
+	return nil
+}
+
+// tcpAddrFor 用 UDP 解析出的地址与真实端口拼出 TCP 监听地址，保证 TCP 与 UDP 同端口。
+func tcpAddrFor(udp *net.UDPAddr, port int) string {
+	if udp.IP == nil {
+		return fmt.Sprintf(":%d", port)
+	}
+	return net.JoinHostPort(udp.IP.String(), fmt.Sprintf("%d", port))
+}
+
+// serveUDP 读取并应答 UDP 报文，直到 conn 关闭或 ctx 取消。
+func (s *Server) serveUDP(ctx context.Context, conn *net.UDPConn, sem chan struct{}) {
 	buf := make([]byte, maxUDPSize)
 	for {
 		n, remote, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
-				return nil
+				return
 			}
 			// 读错误不应拖死进程：记录一次然后继续。
 			continue
@@ -268,15 +313,78 @@ func (s *Server) Serve(ctx context.Context) error {
 		// recover 兜底：应答器 panic 绝不能拖死整个服务。
 		packet := make([]byte, n)
 		copy(packet, buf[:n])
+		write := func(b []byte) error { _, err := conn.WriteToUDP(b, remote); return err }
 		select {
 		case sem <- struct{}{}:
-			go func(remote *net.UDPAddr, packet []byte) {
+			go func(packet []byte) {
 				defer func() { <-sem }()
 				defer func() { _ = recover() }()
-				s.handlePacket(conn, remote, packet)
-			}(remote, packet)
+				s.handlePacket(write, packet)
+			}(packet)
 		default:
-			s.handlePacket(conn, remote, packet)
+			s.handlePacket(write, packet)
+		}
+	}
+}
+
+// serveTCP 接受 TCP 连接并逐帧应答，直到 listener 关闭或 ctx 取消。
+func (s *Server) serveTCP(ctx context.Context, l net.Listener, sem chan struct{}) {
+	for {
+		tc, err := l.Accept()
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				return
+			}
+			// 临时性 accept 错误不应拖死进程：继续重试。
+			continue
+		}
+		go s.serveTCPConn(ctx, tc, sem)
+	}
+}
+
+// serveTCPConn 处理单条 TCP 连接：按 RFC 1035 的 2 字节长度前缀读帧。
+// 每帧复用与 UDP 相同的 handlePacket（解析/应答/计数），写回走带 deadline 的 Write。
+func (s *Server) serveTCPConn(ctx context.Context, tc net.Conn, sem chan struct{}) {
+	defer tc.Close()
+	header := make([]byte, 2)
+	for {
+		// 读超时：避免慢速/空闲客户端长期占用 goroutine。
+		_ = tc.SetReadDeadline(time.Now().Add(tcpIdleTimeout))
+		if _, err := io.ReadFull(tc, header); err != nil {
+			return
+		}
+		length := int(binary.BigEndian.Uint16(header))
+		if length > maxTCPFrame {
+			// 长度超限：按声明长度丢弃以保持帧同步，计数后不处理。
+			s.queries.Add(1)
+			s.malformed.Add(1)
+			if _, err := io.CopyN(io.Discard, tc, int64(length)); err != nil {
+				return
+			}
+			continue
+		}
+		frame := make([]byte, length)
+		if _, err := io.ReadFull(tc, frame); err != nil {
+			return
+		}
+		write := func(b []byte) error {
+			_ = tc.SetWriteDeadline(time.Now().Add(tcpWriteTimeout))
+			// RFC 1035 TCP 应答同样带 2 字节长度前缀，客户端按帧读取。
+			framed := make([]byte, 2+len(b))
+			binary.BigEndian.PutUint16(framed, uint16(len(b)))
+			copy(framed[2:], b)
+			_, err := tc.Write(framed)
+			return err
+		}
+		select {
+		case sem <- struct{}{}:
+			go func(frame []byte) {
+				defer func() { <-sem }()
+				defer func() { _ = recover() }()
+				s.handlePacket(write, frame)
+			}(frame)
+		default:
+			s.handlePacket(write, frame)
 		}
 	}
 }
@@ -291,8 +399,9 @@ type query struct {
 	question []byte // 原始 question 段（name + qtype + qclass），应答原样回显
 }
 
-// handlePacket 解析并应答单个 UDP 包。
-func (s *Server) handlePacket(conn *net.UDPConn, remote *net.UDPAddr, packet []byte) {
+// handlePacket 解析并应答单个报文。write 是「把应答写回对端」的抽象：
+// UDP 用 WriteToUDP，TCP 用带 deadline 的 Write，两条路径复用同一套解析/应答/计数逻辑。
+func (s *Server) handlePacket(write func([]byte) error, packet []byte) {
 	s.queries.Add(1)
 	s.lastQueryAt.Store(time.Now().UnixNano())
 
@@ -304,7 +413,7 @@ func (s *Server) handlePacket(conn *net.UDPConn, remote *net.UDPAddr, packet []b
 		if len(packet) < headerSize {
 			return
 		}
-		_ = respondFormerr(conn, remote, packet)
+		_ = respondFormerr(write, packet)
 		return
 	}
 
@@ -313,7 +422,7 @@ func (s *Server) handlePacket(conn *net.UDPConn, remote *net.UDPAddr, packet []b
 		return
 	}
 	if q.qclass != classIN {
-		_ = respondRefused(conn, remote, q)
+		_ = respondRefused(write, q)
 		s.refused.Add(1)
 		return
 	}
@@ -325,33 +434,33 @@ func (s *Server) handlePacket(conn *net.UDPConn, remote *net.UDPAddr, packet []b
 	switch q.qtype {
 	case typeA:
 		if hit && rec.IP != "" {
-			if err := respondA(conn, remote, q, rec.IP, int(v.ttl)); err == nil {
+			if err := respondA(write, q, rec.IP, int(v.ttl)); err == nil {
 				s.answered.Add(1)
 			}
 			return
 		}
 		// 命中但无 IP，或清单外：一律 REFUSED。
-		_ = respondRefused(conn, remote, q)
+		_ = respondRefused(write, q)
 		s.refused.Add(1)
 	case typeAAAA:
 		// 与 agh.txt 的 AAAA 抑制语义对齐：返回 NODATA。
 		if hit {
-			if err := respondNodata(conn, remote, q); err == nil {
+			if err := respondNodata(write, q); err == nil {
 				s.nodata.Add(1)
 			}
 			return
 		}
-		_ = respondRefused(conn, remote, q)
+		_ = respondRefused(write, q)
 		s.refused.Add(1)
 	default:
 		// 其他类型只承诺 A/AAAA：命中给 NODATA，未命中 REFUSED。
 		if hit {
-			if err := respondNodata(conn, remote, q); err == nil {
+			if err := respondNodata(write, q); err == nil {
 				s.nodata.Add(1)
 			}
 			return
 		}
-		_ = respondRefused(conn, remote, q)
+		_ = respondRefused(write, q)
 		s.refused.Add(1)
 	}
 }
@@ -454,7 +563,7 @@ func writeHeader(out []byte, q query, rcode, qdcount int) {
 }
 
 // respondA 应答一条 A 记录，name 用压缩指针 0xC00C 指向偏移 12 的 question name。
-func respondA(conn *net.UDPConn, remote *net.UDPAddr, q query, ip string, ttl int) error {
+func respondA(write func([]byte) error, q query, ip string, ttl int) error {
 	ip4 := net.ParseIP(ip).To4()
 	if ip4 == nil {
 		return fmt.Errorf("非法 IPv4 地址: %q", ip)
@@ -473,31 +582,28 @@ func respondA(conn *net.UDPConn, remote *net.UDPAddr, q query, ip string, ttl in
 	binary.BigEndian.PutUint32(out[off+6:off+10], uint32(ttl))
 	binary.BigEndian.PutUint16(out[off+10:off+12], 4) // RDLENGTH
 	copy(out[off+12:off+16], ip4)
-	_, err := conn.WriteToUDP(out, remote)
-	return err
+	return write(out)
 }
 
 // respondNodata 应答 NOERROR + 0 条记录（NODATA）。
-func respondNodata(conn *net.UDPConn, remote *net.UDPAddr, q query) error {
+func respondNodata(write func([]byte) error, q query) error {
 	out := make([]byte, headerSize+len(q.question))
 	writeHeader(out, q, rcodeNoError, 1)
 	copy(out[headerSize:], q.question)
-	_, err := conn.WriteToUDP(out, remote)
-	return err
+	return write(out)
 }
 
 // respondRefused 应答 REFUSED。
-func respondRefused(conn *net.UDPConn, remote *net.UDPAddr, q query) error {
+func respondRefused(write func([]byte) error, q query) error {
 	out := make([]byte, headerSize+len(q.question))
 	writeHeader(out, q, rcodeRefused, 1)
 	copy(out[headerSize:], q.question)
-	_, err := conn.WriteToUDP(out, remote)
-	return err
+	return write(out)
 }
 
 // respondFormerr 应答 FORMERR。此时 question 本身可能无效，
 // 按规范 QDCOUNT 置 0 且不回显 question。
-func respondFormerr(conn *net.UDPConn, remote *net.UDPAddr, packet []byte) error {
+func respondFormerr(write func([]byte) error, packet []byte) error {
 	id := uint16(0)
 	flags := uint16(rcodeFormErr)
 	if len(packet) >= headerSize {
@@ -513,8 +619,7 @@ func respondFormerr(conn *net.UDPConn, remote *net.UDPAddr, packet []byte) error
 	binary.BigEndian.PutUint16(out[6:8], 0)
 	binary.BigEndian.PutUint16(out[8:10], 0)
 	binary.BigEndian.PutUint16(out[10:12], 0)
-	_, err := conn.WriteToUDP(out, remote)
-	return err
+	return write(out)
 }
 
 // EncodeQuery 供测试构造查询报文：A / AAAA / 清单外 / 畸形各一。

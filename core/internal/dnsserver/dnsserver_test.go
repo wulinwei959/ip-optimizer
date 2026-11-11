@@ -3,6 +3,7 @@ package dnsserver
 import (
 	"context"
 	"encoding/binary"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -349,4 +350,159 @@ func TestViewLookupConcurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// TestTCPEndToEnd 覆盖 TCP 路径的语义矩阵：A 命中 / AAAA NODATA / 清单外 REFUSED。
+func TestTCPEndToEnd(t *testing.T) {
+	s := New("127.0.0.1:0")
+	s.SetView(NewView([]Record{{Name: "github.com", IP: "1.2.3.4"}}, 60))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = s.Serve(ctx) }()
+	waitStarted(t, s)
+
+	// A 命中：NOERROR + 1 条 A，RDATA 为配置 IP
+	resp := tcpRoundtrip(t, s, EncodeQuery("github.com", typeA))
+	if resp == nil {
+		t.Fatal("TCP 查询无应答")
+	}
+	if rcode(resp) != rcodeNoError {
+		t.Fatalf("A 命中应 NOERROR，实际 rcode=%d", rcode(resp))
+	}
+	if ip, ttl := answerA(resp); ip != "1.2.3.4" || ttl != 60 {
+		t.Fatalf("A 应答内容不符: ip=%s ttl=%d", ip, ttl)
+	}
+
+	// AAAA 命中：NODATA
+	resp = tcpRoundtrip(t, s, EncodeQuery("github.com", typeAAAA))
+	if rcode(resp) != rcodeNoError || ancount(resp) != 0 {
+		t.Fatalf("AAAA 命中应 NODATA，实际 rcode=%d an=%d", rcode(resp), ancount(resp))
+	}
+
+	// 清单外：REFUSED
+	resp = tcpRoundtrip(t, s, EncodeQuery("baidu.com", typeA))
+	if rcode(resp) != rcodeRefused {
+		t.Fatalf("清单外应 REFUSED，实际 rcode=%d", rcode(resp))
+	}
+
+	if st := s.Stats(); st.Queries == 0 || st.Answered == 0 || st.Refused == 0 {
+		t.Fatalf("TCP 运行计数不全: %+v", st)
+	}
+}
+
+// TestTCPResponseLengthPrefix 验证应答也带 2 字节长度前缀，且前缀值等于实际报文长度。
+func TestTCPResponseLengthPrefix(t *testing.T) {
+	s := New("127.0.0.1:0")
+	s.SetView(NewView([]Record{{Name: "a.com", IP: "1.1.1.1"}}, 60))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = s.Serve(ctx) }()
+	waitStarted(t, s)
+
+	conn, err := net.DialTimeout("tcp", s.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("拨号失败: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+	q := EncodeQuery("a.com", typeA)
+	framed := make([]byte, 2+len(q))
+	binary.BigEndian.PutUint16(framed, uint16(len(q)))
+	copy(framed[2:], q)
+	if _, err := conn.Write(framed); err != nil {
+		t.Fatalf("写入失败: %v", err)
+	}
+
+	hdr := make([]byte, 2)
+	if _, err := io.ReadFull(conn, hdr); err != nil {
+		t.Fatalf("读长度前缀失败: %v", err)
+	}
+	ln := int(binary.BigEndian.Uint16(hdr))
+	buf := make([]byte, ln)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("读应答失败: %v", err)
+	}
+	if len(buf) != ln {
+		t.Fatalf("长度前缀 %d 与实际报文 %d 不符", ln, len(buf))
+	}
+}
+
+// TestTCPMalformedOversizeFrame 验证长度超限帧计入 malformed，且按声明长度丢弃后帧同步恢复。
+func TestTCPMalformedOversizeFrame(t *testing.T) {
+	s := New("127.0.0.1:0")
+	s.SetView(NewView([]Record{{Name: "a.com", IP: "1.1.1.1"}}, 60))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = s.Serve(ctx) }()
+	waitStarted(t, s)
+
+	conn, err := net.DialTimeout("tcp", s.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("拨号失败: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+
+	// 声明 5000 字节（超过 maxTCPFrame=4096），并真的发满，让服务端正常 drain。
+	hdr := make([]byte, 2)
+	binary.BigEndian.PutUint16(hdr, 5000)
+	if _, err := conn.Write(hdr); err != nil {
+		t.Fatalf("写超限帧头失败: %v", err)
+	}
+	if _, err := conn.Write(make([]byte, 5000)); err != nil {
+		t.Fatalf("写超限负载失败: %v", err)
+	}
+
+	// 紧接着发一个合法查询：服务端应已丢弃超限负载、帧同步恢复，正常应答。
+	q := EncodeQuery("a.com", typeA)
+	framed := make([]byte, 2+len(q))
+	binary.BigEndian.PutUint16(framed, uint16(len(q)))
+	copy(framed[2:], q)
+	if _, err := conn.Write(framed); err != nil {
+		t.Fatalf("写合法查询失败: %v", err)
+	}
+	hr := make([]byte, 2)
+	if _, err := io.ReadFull(conn, hr); err != nil {
+		t.Fatalf("读应答长度前缀失败: %v", err)
+	}
+	ln := int(binary.BigEndian.Uint16(hr))
+	buf := make([]byte, ln)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("读应答失败: %v", err)
+	}
+	if rcode(buf) != rcodeNoError {
+		t.Fatalf("超限帧后合法查询应正常应答，实际 rcode=%d", rcode(buf))
+	}
+	if s.Stats().Malformed == 0 {
+		t.Fatal("超限帧应计入 malformed")
+	}
+}
+
+// tcpRoundtrip 建立 TCP 连接发送一帧查询，读回一帧应答。
+func tcpRoundtrip(t *testing.T, s *Server, query []byte) []byte {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", s.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("拨号失败: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+	framed := make([]byte, 2+len(query))
+	binary.BigEndian.PutUint16(framed, uint16(len(query)))
+	copy(framed[2:], query)
+	if _, err := conn.Write(framed); err != nil {
+		t.Fatalf("写入失败: %v", err)
+	}
+	hdr := make([]byte, 2)
+	if _, err := io.ReadFull(conn, hdr); err != nil {
+		return nil
+	}
+	ln := int(binary.BigEndian.Uint16(hdr))
+	buf := make([]byte, ln)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		return nil
+	}
+	return buf
 }
