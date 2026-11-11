@@ -1,5 +1,5 @@
 appname=hosts-optimizer-native
-version=1.3.0
+version=1.3.1
 display_name=Hosts 优选订阅
 desc=飞牛原生服务：定时为自定义域名优选可用 IP，生成 hosts / AdGuard Home 订阅文件。单静态二进制，无 Docker、无运行时依赖。
 source=thirdparty
@@ -13,6 +13,6 @@ service_port=18088
 checkport=true
 ctl_stop=true
 disable_authorization_path=true
-changelog=新增应用共享文件夹（文件管理器可见）：管理令牌生成后持久化到 admin-token 文件，重启不变、普通用户可直接查看；运行日志落盘到 logs/app.log（8MB 轮转保留一份备份），不再只存在于系统目录。HO_ADMIN_TOKEN 环境变量仍可覆盖令牌。另按 fnOS 官方 FPK 规范完善：声明 disable_authorization_path（无需用户授权目录）、启动失败写入 TRIM_TEMP_LOGFILE、补充升级/卸载向导提示。
+changelog=修复：域名列表「禁用本组」或单行禁用后改为原地更新该行状态，不再整页重载导致分组自动收起。按 fnOS 官方 FPK 规范完善打包：声明 disable_authorization_path（无需用户授权目录）、启动失败写入 TRIM_TEMP_LOGFILE 用户可见错误、补充升级/卸载向导提示。
 desktop_uidir=ui
 desktop_applaunchname=hosts-optimizer-native.main
