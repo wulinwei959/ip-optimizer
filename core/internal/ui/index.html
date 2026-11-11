@@ -310,7 +310,7 @@ a.about-value:hover{text-decoration:underline}
 <button id="tokenSave" type="button">保存到本浏览器</button>
 <span id="tokenMsg" style="font-size:14px;color:var(--muted);min-width:160px"></span>
 </div>
-<p class="hint">首页与订阅端点（<code>/hosts.txt</code>、<code>/agh.txt</code>、<code>/status.json</code>、<code>/healthz</code>）不需要令牌；<code>/api/*</code> 与 <code>/refresh</code> 需要。未设置环境变量 <code>HO_ADMIN_TOKEN</code> 时，服务每次启动会自动生成一个令牌并打印到运行日志，把它填在上方即可（也可写进环境变量固定下来）。</p>
+<p class="hint">首页与订阅端点（<code>/hosts.txt</code>、<code>/agh.txt</code>、<code>/status.json</code>、<code>/healthz</code>）不需要令牌；<code>/api/*</code> 与 <code>/refresh</code> 需要。令牌保存在应用共享文件夹的 <code>admin-token</code> 文件里（文件管理器可见，重启不变），把它填在上方即可；也可用环境变量 <code>HO_ADMIN_TOKEN</code> 固定覆盖。运行日志同目录 <code>logs/app.log</code>。</p>
 </div>
 
 <div class="card">

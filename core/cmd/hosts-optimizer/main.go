@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 	_ "time/tzdata" // 静态二进制自带时区库，HO_TZ 不依赖宿主的 /usr/share/zoneinfo
@@ -16,6 +17,7 @@ import (
 	"hosts-optimizer/internal/app"
 	"hosts-optimizer/internal/config"
 	"hosts-optimizer/internal/logbuf"
+	"hosts-optimizer/internal/logfile"
 )
 
 // version 由构建脚本通过 -ldflags "-X main.version=..." 注入（值取自 manifest 的 version），
@@ -58,12 +60,23 @@ func main() {
 		log.Printf("时区 %q 不可用，使用系统本地时区: %v", rt.TZ, err)
 	}
 
+	// HO_DATA 指向用户可见的应用数据目录（FPK 共享文件夹）：日志落盘便于在文件管理器查看。
+	if rt.DataDir != "" {
+		lw, err := logfile.Open(filepath.Join(rt.DataDir, "logs"), 8<<20)
+		if err != nil {
+			log.Printf("打开日志文件失败，仅写 stdout 与内存: %v", err)
+		} else {
+			defer lw.Close()
+			log.SetOutput(io.MultiWriter(os.Stdout, logbuf.Default, lw))
+		}
+	}
+
 	a, err := app.New(rt, version)
 	if err != nil {
 		log.Fatalf("初始化失败: %v", err)
 	}
-	log.Printf("hosts-optimizer %s 启动：配置=%s 产物=%s 状态=%s 端口=%s",
-		version, rt.ConfigDir, rt.OutputDir, rt.StateDir, rt.Port)
+	log.Printf("hosts-optimizer %s 启动：配置=%s 产物=%s 状态=%s 数据=%s 端口=%s",
+		version, rt.ConfigDir, rt.OutputDir, rt.StateDir, rt.DataDir, rt.Port)
 	if err := a.Run(ctx); err != nil {
 		log.Fatalf("运行结束: %v", err)
 	}

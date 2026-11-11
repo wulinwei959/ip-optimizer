@@ -72,13 +72,15 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 - 路径：`/`、`/hosts.txt`、`/agh.txt`、`/status.json`、`/api/dns`
 - `HO_*` 环境变量：
   - `HO_CONFIG`（`$TRIM_PKGETC`，内含 `domains.json`）、`HO_OUTPUT`、`HO_STATE`
+  - `HO_DATA`（用户可见的应用数据目录，FPK 下为共享文件夹 `hosts-optimizer/data`；存放 `admin-token` 与 `logs/app.log`）
   - `HO_PORT`、`HO_TZ`、`HO_CA_BUNDLE`
   - `HO_SCHEDULE_MINUTES`（可选覆盖配置）、`HO_PROBE_DNS`、`HO_PROBE_CONCURRENCY`
   - `HO_DNS_LISTEN`、`HO_DNS_TTL`（应答器监听地址与 TTL；前者接受 off 类词表禁用）
   - `HO_PROBE_TOP_N`、`HO_PROBE_FULL_EVERY`（自适应探测面：常规轮次只测「当前 IP + 前 N 个挑战者」，每 K 轮做一次全量扫描）
   - `HO_WATCH_INTERVAL_SECONDS`、`HO_WATCH_SWITCH_PERCENT`（健康探针：定期只测当前 IP，失效或明显变慢时触发即时轮次，不用等下一个整轮）
-  - `HO_ADMIN_TOKEN`（管理端点令牌；不设置时每次启动随机生成一个并打印一次到运行日志，填进界面或写进环境变量即可固定）
+  - `HO_ADMIN_TOKEN`（管理端点令牌；不设置时首次启动生成并持久化到 `$HO_DATA/admin-token`，重启复用，文件管理器可直接查看；设置后优先于文件）
 - 管理端点（`/api/*`、`/refresh`）需要令牌，订阅端点（`/`、`/hosts.txt`、`/agh.txt`、`/status.json`、`/healthz`）保持开放 —— 否则 AGH 拉不到订阅、用户也进不了界面
+- 日志：stdout + 内存环（界面「运行日志」）+ `$HO_DATA/logs/app.log`（8MB 轮转，保留 `app.log.1` 一份备份）
 - 非 root 运行：**只做 TCP/TLS 探测，不用 ICMP**
 - 原子写；整轮校验全灭时保留上一轮结果，绝不写空文件；产物至少含 1 条规则
 
