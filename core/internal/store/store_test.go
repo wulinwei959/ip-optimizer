@@ -1,6 +1,9 @@
 package store
 
 import (
+	"fmt"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -96,4 +99,46 @@ func TestDecidePersistsCandidates(t *testing.T) {
 	if len(st.Candidates) != 0 {
 		t.Fatalf("失败轮应清空候选列表: %+v", st.Candidates)
 	}
+}
+
+// TestSnapshotSerializedUnderCallerLock 回归测试：序列化必须在调用方锁内完成。
+// 若把遍历 Domains 挪进写盘 goroutine，就会与并发 Decide 撞上「并发 map 读写」，
+// Go 会直接 fatal 终止进程，本测试以崩溃形式失败。
+func TestSnapshotSerializedUnderCallerLock(t *testing.T) {
+	s := &State{Domains: make(map[string]*DomainState)}
+	var mu sync.Mutex
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				mu.Lock()
+				s.Decide(fmt.Sprintf("d%d.example.com", i%4),
+					[]Candidate{{IP: "1.1.1.1", LatencyMS: 1}}, 20, 2, time.Now())
+				mu.Unlock()
+			}
+		}(i)
+	}
+
+	for i := 0; i < 32; i++ {
+		mu.Lock()
+		data := s.Snapshot(time.Now())
+		mu.Unlock()
+		if data == nil {
+			t.Fatal("Snapshot 返回空快照")
+		}
+		s.SaveAsync(filepath.Join(t.TempDir(), "state.json"), data)
+	}
+
+	close(stop)
+	wg.Wait()
+	s.WaitSave()
 }

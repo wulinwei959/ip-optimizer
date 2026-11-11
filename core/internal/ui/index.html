@@ -1,0 +1,2160 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>Hosts 优选订阅</title>
+<style>
+:root{--bg:#f4f6f9;--card:#fff;--line:#e5e8ee;--text:#1f2937;--muted:#6b7280;--accent:#2563eb;--accent-dark:#1d4ed8;--danger:#dc2626;--ok:#16a34a;--surface-2:#f8fafc;--radius:14px;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",system-ui,sans-serif}
+*{box-sizing:border-box}
+body{font-family:var(--sans);background:var(--bg);color:var(--text);max-width:1180px;margin:0 auto;padding:30px 20px 56px;line-height:1.65;font-size:15px;letter-spacing:.01em;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+.page-head{display:flex;align-items:center;gap:14px;margin:2px 0 18px}
+.logo{width:46px;height:46px;flex:0 0 auto;display:block;filter:drop-shadow(0 2px 6px rgba(30,58,138,.25))}
+.logo svg{width:100%;height:100%;display:block}
+h1{font-size:26px;font-weight:700;letter-spacing:-.01em;margin:0 0 4px;line-height:1.25}
+.sub{color:var(--muted);font-size:13px;margin:0;line-height:1.5;font-variant-numeric:tabular-nums}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px;margin:16px 0;box-shadow:0 1px 2px rgba(16,24,40,.04)}
+/* 表格必须 fixed 布局：table-cell 的 max-width 会被浏览器忽略，
+   长域名会把整列顶宽并与邻列文字重叠。fixed 下 th 的 width 才会真正生效。 */
+table{border-collapse:collapse;width:100%;font-size:14px;font-variant-numeric:tabular-nums;table-layout:fixed}
+th,td{border-bottom:1px solid var(--line);padding:12px;text-align:left;vertical-align:middle;min-width:0}
+th{overflow-wrap:anywhere}
+td{overflow-wrap:anywhere;line-break:anywhere}
+th{background:#f8fafc;font-weight:600;color:#4b5563;white-space:nowrap;font-size:12.5px;letter-spacing:.04em}
+tbody tr:hover{background:#f9fafb}
+tbody td:nth-child(2),tbody td:nth-child(3){font-family:var(--mono);font-size:13.5px}
+tbody tr:last-child td{border-bottom:none}
+tbody td:nth-child(5){white-space:nowrap}
+code{background:#eef2f7;padding:2px 6px;border-radius:5px;font-size:12.5px;font-family:var(--mono)}
+.bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+button{cursor:pointer;padding:8px 16px;border:1px solid #d7dce5;border-radius:8px;background:#fff;color:#1f2937;font-size:13.5px;font-weight:500;font-family:inherit;line-height:1.4;transition:background .15s,border-color .15s,box-shadow .15s}
+button:hover{background:#f3f4f6;border-color:#c3c9d4}
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid rgba(37,99,235,.35);outline-offset:1px}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+button.primary:hover{background:var(--accent-dark);border-color:var(--accent-dark)}
+button.danger{background:#fff;color:var(--danger);border-color:#f0b4b4}
+button.danger:hover{background:#fef2f2;border-color:var(--danger)}
+input[type=text],input[type=number],select{padding:8px 11px;border:1px solid #d7dce5;border-radius:8px;font-size:13.5px;font-family:inherit;background:#fff;color:var(--text)}
+#sub{flex:1 1 320px;min-width:200px;font-family:var(--mono)}
+#msg{font-size:14px;color:var(--muted);min-width:180px}
+#search{flex:1 1 240px;min-width:180px}
+#statusFilter{background:#fff}
+details{margin:16px 0 0}
+summary{cursor:pointer;font-weight:600;padding:6px 0;color:#111827;font-size:15px}
+summary::marker{color:var(--accent)}
+.summary-meta{font-weight:400;font-size:13px;color:var(--muted);margin-left:6px;font-variant-numeric:tabular-nums}
+#domainListDetails>summary{margin-bottom:10px}
+.hint{color:var(--muted);font-size:13px;margin:8px 0}
+#cfg{width:100%;min-height:260px;font-family:var(--mono);font-size:12.5px;line-height:1.6;padding:12px;border:1px solid #d7dce5;border-radius:8px;resize:vertical;background:#fbfcfe}
+#cfgMsg{font-size:14px;color:var(--muted)}
+.status-dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:8px;vertical-align:middle}
+.status-ok{background:var(--ok);box-shadow:0 0 6px rgba(22,163,74,.5)}
+.status-fail{background:#ef4444;box-shadow:0 0 6px rgba(239,68,68,.5)}
+.status-unknown{background:#9ca3af}
+/* 域名/IP 列：等宽字体 + 超出省略。table-layout:fixed 下宽度由 th 决定，
+   这里只负责截断显示，title 属性保留完整内容供悬停查看。 */
+td.truncate{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block;font-family:var(--mono)}
+/* 域名 / IP 列：单元格自身不截断，交给内部 span 省略，
+   这样长域名不会把邻列顶开造成文字重叠。 */
+td.cell-name,td.cell-ip{max-width:100%;overflow:hidden;font-family:var(--mono);font-size:13px}
+td.cell-name .truncate,td.cell-ip .truncate{display:inline-block;max-width:100%;vertical-align:middle}
+/* 操作列：按钮可换行，长域名行不会把操作列顶宽 */
+td.cell-ops{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+/* badge 放在 flex 操作列内：flex 子项默认 min-width:auto 会把长中文撑破列宽，
+   必须显式 min-width:0 才会按 max-width + ellipsis 截断。
+   同时给 badge 一个收缩上限，保证它不会把同行按钮挤出单元格。 */
+td.cell-ops .badge{flex:0 1 auto;min-width:0;max-width:8em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-left:0;vertical-align:middle}
+.truncate{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:middle}
+.badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;background:#eff6ff;color:#1d4ed8;margin-left:6px;white-space:nowrap}
+.badge-ct{background:#fff7ed;color:#c2410c}
+.badge-wl{background:#ecfdf5;color:#047857}
+.badge-rl{background:#f5f3ff;color:#6d28d9}
+.latency-btn{padding:0;border:none;background:transparent;color:var(--text);font-size:14px;font-family:inherit;text-decoration:underline dotted;text-underline-offset:3px;cursor:pointer}
+.latency-btn:hover{background:transparent;color:var(--accent)}
+.switch-btn{padding:4px 12px;font-size:12px}
+.discover{border:1px dashed #cfd6e2;background:#fafbfe;border-radius:10px;padding:12px;margin:10px 0 14px}
+.discover-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+#discoverInput{flex:1 1 280px;min-width:200px}
+.dropdown{position:relative;flex:0 0 auto}
+#discoverToggle{min-width:136px}
+#discoverToggle .pill{display:inline-block;min-width:20px;padding:0 6px;margin-left:4px;border-radius:999px;background:var(--accent);color:#fff;font-size:12px;line-height:18px;text-align:center}
+.dropdown-panel{display:none;position:absolute;top:calc(100% + 6px);right:0;left:auto;z-index:40;width:min(460px,calc(100vw - 32px));max-height:70vh;background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 32px rgba(16,24,40,.16);overflow:hidden}
+.dropdown.open .dropdown-panel{display:block}
+.dropdown-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 12px;border-bottom:1px solid var(--line);background:#f8fafc;font-size:13px}
+.dropdown-head label{display:flex;align-items:center;gap:7px;cursor:pointer;font-weight:600}
+.dropdown-head .muted{color:var(--muted)}
+.dropdown-list{max-height:320px;overflow:auto}
+.dropdown-item{display:flex;align-items:center;gap:9px;padding:8px 12px;border-bottom:1px solid #f1f3f7;font-size:13px;cursor:pointer}
+.dropdown-item:last-child{border-bottom:none}
+.dropdown-item:hover{background:#f5f8ff}
+.dropdown-item.disabled{opacity:.55;cursor:not-allowed;background:#fafafa}
+.dropdown-item input{margin:0;accent-color:var(--accent);flex:0 0 auto}
+.dropdown-item .domain{font-family:var(--mono);color:#111827;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.dropdown-item .meta{color:var(--muted);font-size:12px;white-space:nowrap}
+.dropdown-empty{padding:18px 12px;text-align:center;color:var(--muted);font-size:13px}
+.cfg-tabs{display:inline-flex;gap:4px;padding:3px;background:#eef2f7;border-radius:9px;margin:10px 0 14px}
+.cfg-tabs button{border:none;background:transparent;padding:6px 14px;font-size:13px;border-radius:7px}
+.cfg-tabs button.active{background:#fff;color:var(--accent);box-shadow:0 1px 3px rgba(16,24,40,.12)}
+.cfg-form{display:none}
+.cfg-form.active{display:block}
+.cfg-json-wrap{display:none}
+.cfg-json-wrap.active{display:block}
+.cfg-section{border:1px solid var(--line);border-radius:10px;margin:0 0 12px;background:var(--card);overflow:hidden}
+.cfg-section>summary{position:relative;padding:12px 14px 12px 32px;font-size:13px;font-weight:600;color:var(--text);cursor:pointer;list-style:none;user-select:none}
+.cfg-section>summary::-webkit-details-marker{display:none}
+.cfg-section>summary::marker{content:""}
+.cfg-section>summary::before{content:"▶";position:absolute;left:14px;top:13px;font-size:10px;color:var(--accent)}
+.cfg-section[open]>summary::before{content:"▼"}
+.cfg-section[open]>summary{border-bottom:1px solid var(--line);background:var(--surface-2)}
+.cfg-body{padding:12px 14px 14px}
+.field-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+/* label 作为整块可点击区：内部文字与输入框都要能收缩，
+   否则长中文标签会把 input 挤出网格列造成溢出。 */
+.field-grid label{display:flex;flex-direction:column;gap:5px;font-size:13px;color:#4b5563;min-width:0;cursor:pointer}
+.field-grid label>input{min-width:0;width:100%}
+.cfg-body>label{display:flex;flex-direction:column;gap:5px;min-width:0;font-size:13px;color:#4b5563;cursor:pointer}
+.cfg-body>label>input{min-width:0;width:100%}
+.domain-adv label.adv-check{flex-direction:row;align-items:center;gap:8px;flex-wrap:nowrap}
+.domain-adv label.adv-check input{width:15px;height:15px;flex:0 0 auto;accent-color:var(--accent)}
+.field-grid label.wide{grid-column:1/-1}
+.field-grid input[type=text],.field-grid input[type=number]{width:100%}
+.checks{display:flex;flex-wrap:wrap;gap:14px;padding:6px 0}
+.checks label{flex-direction:row;align-items:center;gap:6px;font-size:13px;color:#374151;cursor:pointer}
+.checks input{accent-color:var(--accent)}
+.domain-editor{display:flex;flex-direction:column;gap:8px}
+.domain-item{border:1px solid var(--line);border-radius:9px;background:#fff;overflow:hidden}
+.domain-main{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:9px 11px}
+.domain-main .d-name{flex:1 1 240px;min-width:160px;font-family:var(--mono)}
+.domain-main label{display:flex;align-items:center;gap:6px;font-size:13px;color:#4b5563;white-space:nowrap;cursor:pointer}
+.domain-main input[type=checkbox]{width:15px;height:15px;accent-color:var(--accent);margin:0}
+.domain-adv{display:none;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;padding:10px 11px;border-top:1px dashed var(--line);background:#fafbfe}
+.domain-item.open .domain-adv{display:grid}
+.domain-adv label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+.domain-adv input{width:100%}
+.domain-empty{color:var(--muted);font-size:13px;padding:6px 2px;margin:0}
+.table-tools{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:10px}
+.table-tools .left{display:flex;gap:10px;align-items:center}
+#selCount{font-size:13px;color:var(--muted)}
+.select-cell{width:42px}
+.select-cell input{width:15px;height:15px;accent-color:var(--accent);cursor:pointer;margin:0}
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(17,24,39,.55);z-index:100;align-items:center;justify-content:center;padding:20px}
+.modal-overlay.show{display:flex}
+.modal{display:flex;flex-direction:column;background:var(--card,#fff);border:1px solid var(--line);border-radius:12px;padding:20px 22px;width:min(94vw,760px);max-height:84vh;overflow:hidden;box-shadow:0 24px 60px rgba(16,24,40,.35)}
+.modal h3{margin:0 0 12px;font-size:16px;line-height:1.5;word-break:break-all;flex:0 0 auto}
+.modal .progress{margin:0 0 10px;height:6px;flex:0 0 auto;background:#eef1f6;border-radius:3px;overflow:hidden}
+.modal .progress-bar{height:100%;width:0%;background:var(--accent);transition:width .3s,background .3s}
+.modal .modal-hint{margin:0 0 10px;font-size:13px;color:var(--muted);line-height:1.5;flex:0 0 auto;word-break:break-word}
+.modal .result-list{flex:1 1 auto;min-height:140px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:6px;background:var(--surface-2)}
+.modal .result-item{display:flex;align-items:flex-start;gap:10px;padding:9px 10px;border-radius:8px;font-size:13px}
+.modal .result-item + .result-item{border-top:1px solid var(--line)}
+.modal .result-item:hover{background:rgba(37,99,235,.06)}
+.modal .result-dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;margin-top:6px}
+.modal .result-ok .result-dot{background:var(--ok)}
+.modal .result-fail .result-dot{background:#ef4444}
+.modal .result-main{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:4px}
+.modal .result-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+.modal .result-domain{font-family:var(--mono);color:var(--text);word-break:break-all;line-height:1.4}
+.modal .result-source{font-size:11px;padding:1px 6px;border-radius:8px}
+.modal .result-ips{color:var(--muted);font-size:12px;font-family:var(--mono);line-height:1.5;word-break:break-all;white-space:normal}
+.modal .result-info{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:3px}
+.modal .modal-empty{display:flex;flex-direction:column;align-items:center;gap:10px;padding:28px 16px;color:var(--muted);font-size:13px;text-align:center}
+.modal-actions{display:flex;flex-wrap:wrap;gap:10px;justify-content:flex-end;margin-top:14px;padding-top:14px;border-top:1px solid var(--line);flex:0 0 auto}
+.table-row-hidden{display:none}
+.group-row td{background:#f7f9fc;padding:0}
+.group-row.open td{background:#eff4fb}
+.group-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 12px;flex-wrap:wrap;min-width:0}
+/* 分组标题本身是 button（inline-flex 容器），省略要作用在内部的 .group-name 上。
+   关键是给 button 一个可收缩基准，否则长主域名会把整行撑开。 */
+.group-toggle{flex:1 1 120px;min-width:0;max-width:100%}
+.group-toggle .group-name{flex:0 1 auto;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+.group-toggle .group-count,.group-toggle .group-ok{flex:0 0 auto;white-space:nowrap}
+.group-actions{display:flex;align-items:center;gap:14px;flex:0 0 auto;flex-wrap:wrap}
+.group-toggle{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid transparent;border-radius:8px;background:transparent;font-size:14px;font-weight:600;color:#111827}
+.group-toggle:hover{background:#e8eef8;border-color:#d5deec}
+.group-toggle .caret{width:14px;color:var(--accent);font-size:11px;text-align:center}
+.group-name{font-family:var(--mono)}
+.group-count{font-weight:400;color:var(--muted);font-size:13px}
+.group-ok{font-weight:400;color:var(--ok);font-size:13px}
+.group-ok.has-bad{color:#b45309}
+.group-select{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);cursor:pointer;white-space:nowrap}
+.group-select input{width:15px;height:15px;accent-color:var(--accent);margin:0}
+tr.domain-row td{background:#fff}
+tr.domain-row td:nth-child(2){padding-left:32px}
+@media (max-width:768px){
+  body{padding:18px 12px 40px}
+  h1{font-size:24px}
+  table{font-size:13px}
+  th,td{padding:9px 7px}
+  /* 窄屏下隐藏「节点」列，优先保证域名/IP/状态/操作可读 */
+  th:nth-child(6),td:nth-child(6){display:none}
+  /* 操作列按钮在窄屏改为两列网格，避免一行挤成竖条 */
+  td.cell-ops{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+  td.cell-ops .badge{grid-column:1/-1;max-width:100%}
+  /* 域名列表工具栏改为纵向堆叠 */
+  .table-tools{flex-direction:column;align-items:stretch}
+  .table-tools .left{flex-wrap:wrap}
+  .group-head{flex-direction:column;align-items:stretch}
+  .group-actions{justify-content:flex-start}
+  .truncate{max-width:150px}
+  .card{padding:14px}
+  #discoverInput{flex:1 1 100%}
+}
+:root[data-theme="dark"]{--bg:#0f1216;--card:#171c22;--line:#2a323c;--text:#e6e9ee;--muted:#9aa4b2;--accent:#60a5fa;--accent-dark:#3b82f6;--danger:#f87171;--ok:#34d399;--surface-2:#1d242c}
+:root[data-theme="dark"] .card{box-shadow:0 1px 2px rgba(0,0,0,.35)}
+:root[data-theme="dark"] th{background:#1d242c;color:#cbd5e1}
+:root[data-theme="dark"] tbody tr:hover{background:#1f272f}
+:root[data-theme="dark"] code{background:#2a333f}
+:root[data-theme="dark"] button{background:#1b212a;border-color:#3a4453;color:#e6e9ee}
+:root[data-theme="dark"] button:hover{background:#232b35;border-color:#4b5563}
+:root[data-theme="dark"] button.primary{background:var(--accent);border-color:var(--accent);color:#0b1220}
+:root[data-theme="dark"] button.primary:hover{background:var(--accent-dark);border-color:var(--accent-dark);color:#fff}
+:root[data-theme="dark"] button.danger{background:#1b212a;border-color:#7f3b3b}
+:root[data-theme="dark"] button.danger:hover{background:#2a1b1b;border-color:var(--danger)}
+:root[data-theme="dark"] input[type=text],:root[data-theme="dark"] input[type=number],:root[data-theme="dark"] select{background:#12171d;border-color:#3a4453;color:var(--text)}
+:root[data-theme="dark"] #statusFilter,:root[data-theme="dark"] #themeSel{background:#12171d}
+:root[data-theme="dark"] summary{color:var(--text)}
+:root[data-theme="dark"] #cfg{background:#12171d;border-color:#3a4453}
+:root[data-theme="dark"] .status-fail{background:#f87171}
+:root[data-theme="dark"] .badge{background:rgba(96,165,250,.16);color:#93c5fd}
+:root[data-theme="dark"] .badge-ct{background:rgba(251,146,60,.16);color:#fdba74}
+:root[data-theme="dark"] .badge-wl{background:rgba(52,211,153,.16);color:#6ee7b7}
+:root[data-theme="dark"] .badge-rl{background:rgba(167,139,250,.16);color:#c4b5fd}
+:root[data-theme="dark"] .discover{background:#131920;border-color:#3a4453}
+:root[data-theme="dark"] .dropdown-panel{background:var(--card);box-shadow:0 12px 32px rgba(0,0,0,.5)}
+:root[data-theme="dark"] .dropdown-head{background:#1d242c}
+:root[data-theme="dark"] .dropdown-item{border-color:#232b35}
+:root[data-theme="dark"] .dropdown-item:hover{background:#232b35}
+:root[data-theme="dark"] .dropdown-item.disabled{background:#141a21}
+:root[data-theme="dark"] .dropdown-item .domain{color:var(--text)}
+:root[data-theme="dark"] .cfg-tabs{background:#232b35}
+:root[data-theme="dark"] .cfg-tabs button.active{background:#2f3945;color:var(--accent)}
+:root[data-theme="dark"] .field-grid label,:root[data-theme="dark"] .domain-main label{color:#b6c0cc}
+:root[data-theme="dark"] .checks label{color:#cbd5e1}
+:root[data-theme="dark"] .domain-item{background:var(--card)}
+:root[data-theme="dark"] .domain-adv{background:#141a21}
+:root[data-theme="dark"] .modal{background:var(--card);box-shadow:0 20px 50px rgba(0,0,0,.55)}
+:root[data-theme="dark"] .modal .result-item:hover{background:#232b35}
+:root[data-theme="dark"] .modal .result-domain{color:var(--text)}
+:root[data-theme="dark"] .modal .progress{background:#232b35}
+:root[data-theme="dark"] .group-row td{background:#1a222b}
+:root[data-theme="dark"] .group-row.open td{background:#1f2a37}
+:root[data-theme="dark"] .group-toggle{color:var(--text)}
+:root[data-theme="dark"] .group-toggle:hover{background:#232b35;border-color:#3a4453}
+:root[data-theme="dark"] .group-ok.has-bad{color:#fbbf24}
+:root[data-theme="dark"] tr.domain-row td{background:var(--card)}
+/* 分流行可能是 50+ 个域名，readonly input 会被截断且难以全选，
+   改用 pre 允许整段换行显示，复制时用 Range 选中全部文本。 */
+.agh-line{margin:10px 0 0;padding:10px 12px;background:var(--surface-2,#f8fafc);border:1px solid var(--line);border-radius:8px;font-family:var(--mono);font-size:12.5px;line-height:1.6;white-space:pre-wrap;word-break:break-all;color:var(--text);max-height:140px;overflow:auto}
+.log-tools{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:10px 0}
+.log-tools label{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);cursor:pointer;white-space:nowrap}
+.log-tools input[type=checkbox]{width:15px;height:15px;accent-color:var(--accent);margin:0}
+#logFilter{flex:1 1 240px;min-width:160px}
+#logView{height:340px;overflow:auto;margin:0;padding:12px;background:var(--card);border:1px solid var(--line);border-radius:8px;font-family:var(--mono);font-size:12.5px;line-height:1.55;white-space:pre-wrap;word-break:break-all;color:var(--text)}
+#logView .log-line{display:block}
+#logView .log-time{color:var(--muted);margin-right:8px}
+#logState{font-size:13px;color:var(--muted)}
+.mono{font-family:var(--mono)}
+.about-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px 24px;margin:6px 0 14px}
+.about-item{display:flex;gap:10px;align-items:baseline;font-size:13.5px;min-width:0}
+.about-label{color:var(--muted);flex:0 0 auto;font-size:12.5px}
+.about-value{color:var(--text);min-width:0;word-break:break-all;font-size:13px}
+a.about-value{color:var(--accent);text-decoration:none}
+a.about-value:hover{text-decoration:underline}
+.about-block h4{margin:0 0 6px;font-size:13px;color:var(--text);font-weight:600}
+.about-steps{margin:0;padding-left:20px;color:var(--muted);font-size:13px;line-height:1.85}
+.about-steps code{font-size:12px}
+.about-foot{margin-top:12px;color:var(--muted);font-size:12.5px;line-height:1.6}
+.history-tools{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:10px 0}
+#historyDomain{min-width:180px}
+#historyRange{min-width:130px}
+#historyState{font-size:13px;color:var(--muted)}
+.trend-wrap{margin:6px 0 14px}
+#trendChart{width:100%;height:220px;display:block}
+.trend-grid{stroke:var(--line);stroke-width:1}
+.trend-label{fill:var(--muted);font-size:11px}
+.trend-line{fill:none;stroke:var(--accent);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.trend-dot{fill:var(--accent)}
+.trend-area{fill:var(--accent);opacity:.10;stroke:none}
+.history-table-wrap{max-height:320px;overflow:auto;border:1px solid var(--line);border-radius:8px}
+.history-table{width:100%;font-size:13px}
+.history-table th{position:sticky;top:0;z-index:1}
+.history-table td,.history-table th{padding:8px 10px}
+.history-empty{padding:16px;text-align:center;color:var(--muted);font-size:13px}
+</style>
+<script>
+(function(){try{var m=localStorage.getItem("ho-theme")||"system";var d=m==="dark"||(m==="system"&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.setAttribute("data-theme",d?"dark":"light");}catch(e){}})();
+</script>
+</head><body>
+<header class="page-head">
+  <span class="logo" aria-hidden="true">
+    <svg viewBox="0 0 48 48">
+      <defs>
+        <linearGradient id="hoLogoBg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#1e3a8a"/>
+          <stop offset="1" stop-color="#4f46e5"/>
+        </linearGradient>
+      </defs>
+      <rect width="48" height="48" rx="11" fill="url(#hoLogoBg)"/>
+      <circle cx="24" cy="24" r="13" fill="none" stroke="#fff" stroke-width="2"/>
+      <ellipse cx="24" cy="24" rx="6" ry="13" fill="none" stroke="#fff" stroke-width="1.5"/>
+      <line x1="11" y1="24" x2="37" y2="24" stroke="#fff" stroke-width="1.5"/>
+      <path d="M27 14 L20 26 h5 l-3 8 9-13 h-5 z" fill="#22c55e" stroke="#fff" stroke-width="1.2" stroke-linejoin="round"/>
+    </svg>
+  </span>
+  <div>
+    <h1>Hosts 优选订阅</h1>
+    <p class="sub">生成于 {{.GeneratedAt}} · 每 {{.ScheduleMinutes}} 分钟轮询 · 有效 {{.ActiveCount}}/{{.DomainCount}} 个域名</p>
+  </div>
+</header>
+
+<div class="card">
+<div class="bar">
+<input id="adminToken" type="password" placeholder="管理令牌（订阅端点无需填写）" autocomplete="off">
+<button id="tokenSave" type="button">保存到本浏览器</button>
+<span id="tokenMsg" style="font-size:14px;color:var(--muted);min-width:160px"></span>
+</div>
+<p class="hint">首页与订阅端点（<code>/hosts.txt</code>、<code>/agh.txt</code>、<code>/status.json</code>、<code>/healthz</code>）不需要令牌；<code>/api/*</code> 与 <code>/refresh</code> 需要。未设置环境变量 <code>HO_ADMIN_TOKEN</code> 时，服务每次启动会自动生成一个令牌并打印到运行日志，把它填在上方即可（也可写进环境变量固定下来）。</p>
+</div>
+
+<div class="card">
+<div class="bar">
+<input id="sub" type="text" readonly>
+<button id="copy" type="button">复制订阅地址</button>
+<button id="refresh" type="button">刷新 AGH 规则</button>
+<select id="statusFilter">
+  <option value="all">全部</option>
+  <option value="ok">正常</option>
+  <option value="fail">失败</option>
+  <option value="pending">待探测</option>
+  <option value="disabled">已禁用</option>
+</select>
+<select id="themeSel" title="主题">
+  <option value="system">跟随系统</option>
+  <option value="light">浅色</option>
+  <option value="dark">深色</option>
+</select>
+<input id="search" type="text" placeholder="搜索域名/IP/说明...">
+<span id="msg"></span>
+</div>
+
+<p class="hint">在 AdGuard Home、过滤器 -> DNS 重写清单、添加上述地址，更新间隔设为 1 小时（推荐子域名且开启 AAAA 返回 NODATA）；亦可用 <code>/hosts.txt</code>。详见 <code>/status.json</code></p>
+{{if not .Ready}}<p style="color:#d32f2f">暂无有效 IP：请先添加域名并触发一轮轮询</p>{{end}}
+</div>
+
+<div class="card">
+<details>
+<summary>编辑域名清单 (domains.json)</summary>
+<div class="discover">
+  <div class="discover-row">
+    <input id="discoverInput" type="text" placeholder="输入主域名，如 github.com" spellcheck="false" autocomplete="off">
+    <button id="discoverBtn" type="button" class="primary">获取域名列表</button>
+    <div class="dropdown" id="discoverDropdown">
+      <button id="discoverToggle" type="button" disabled>选择域名<span class="pill" id="discoverCount">0</span></button>
+      <div class="dropdown-panel">
+        <div class="dropdown-head">
+          <label><input type="checkbox" id="discoverAll"> 全选</label>
+          <span class="muted" id="discoverSummary">尚未获取</span>
+        </div>
+        <div class="dropdown-list" id="discoverList"><div class="dropdown-empty">输入主域名后点「获取域名列表」</div></div>
+      </div>
+    </div>
+    <button id="discoverAdd" type="button" disabled>添加</button>
+  </div>
+  <p class="hint" id="discoverMsg">输入主域名后会从 CT 日志、字典与规则中发现相关子域名；勾选后点「添加」写入下方配置，再点「保存并生效」。</p>
+</div>
+<div class="cfg-tabs">
+  <button id="tabForm" type="button" class="active">图形化</button>
+  <button id="tabJSON" type="button">JSON 源码</button>
+</div>
+
+<div id="cfgForm" class="cfg-form active">
+  <details class="cfg-section" open>
+    <summary>定时与探测</summary>
+    <div class="cfg-body">
+      <div class="field-grid">
+        <label>轮询周期（分钟）<input id="fSchedule" type="number" min="1" max="1440"></label>
+        <label>探测端口<input id="fPort" type="number" min="1" max="65535"></label>
+        <label>并发数<input id="fConcurrency" type="number" min="1" max="256"></label>
+        <label>最大候选 IP 数<input id="fMaxCandidates" type="number" min="1"></label>
+        <label>TCP 探测轮数<input id="fTCPRounds" type="number" min="1"></label>
+        <label>单次超时（秒）<input id="fTimeout" type="number" min="1" max="60"></label>
+      </div>
+    </div>
+  </details>
+  <details class="cfg-section">
+    <summary>DNS 与切换策略</summary>
+    <div class="cfg-body">
+      <div class="field-grid">
+        <label class="wide">探测 DNS（逗号分隔）<input id="fProbeDNS" type="text" placeholder="223.5.5.5, tls://dns.alidns.com, https://dns.cloudflare.com/dns-query"></label>
+        <label>滞回百分比（%）<input id="fHystPct" type="number" min="0" max="100"></label>
+        <label>滞回轮数<input id="fHystRounds" type="number" min="1" max="100"></label>
+      </div>
+      <p class="hint" style="margin:8px 0 0">支持 UDP（字面 IP）、DoT（tls://主机[:853]）、DoH（https://主机/路径），可混用；DoQ 暂不支持。</p>
+    </div>
+  </details>
+  <details class="cfg-section">
+    <summary>DNS 应答器（供 AdGuard Home 上游分流）</summary>
+    <div class="cfg-body">
+      <div class="field-grid">
+        <label class="wide">监听地址（host:port）<input id="fDNSListen" type="text" placeholder="127.0.0.1:18053；填 off 表示禁用"></label>
+        <label>应答 TTL（秒）<input id="fDNSTTL" type="number" min="5" max="3600"></label>
+      </div>
+      <p class="hint" style="margin:8px 0 0">留空使用默认值 127.0.0.1:18053 与 60 秒。地址必须是 IP 字面量（留空 host 表示监听全部接口，需自行加防火墙）；填 off / disabled / none / 0 / false 可禁用。修改后下一轮探测会自动重绑监听，页面「DNS 应答服务」卡片会显示当前值与分流规则。<strong>AdGuard Home 用 Docker 部署时，这里填 0.0.0.0:18053 或 NAS 内网 IP；填 0.0.0.0 时分流行会自动替换为本机内网 IP。</strong></p>
+      <p class="hint" style="margin:8px 0 0"><strong>注意</strong>：与 AdGuard Home 的过滤器订阅二选一，不要同时启用。</p>
+    </div>
+  </details>
+  <details class="cfg-section">
+    <summary>产物与校验</summary>
+    <div class="cfg-body">
+      <label class="wide">HTTP 状态码白名单（逗号分隔，留空不校验）
+        <input id="fExpectStatus" type="text" placeholder="如 200,301,302,403">
+      </label>
+      <label class="wide">生成的产物
+        <span class="checks">
+          <label><input type="checkbox" id="fOutHosts" value="hosts.txt"> hosts.txt</label>
+          <label><input type="checkbox" id="fOutAGH" value="agh.txt"> agh.txt</label>
+          <label><input type="checkbox" id="fOutStatus" value="status.json"> status.json</label>
+        </span>
+      </label>
+      <p class="hint" style="margin:8px 0 0">HTTP 状态码白名单默认不校验：多数站点根路径返回 403/404，开启后可能误杀可用 IP；outputs 为保留字段，三项产物当前固定生成。</p>
+    </div>
+  </details>
+  <details class="cfg-section">
+    <summary>子域名展开</summary>
+    <div class="cfg-body">
+      <div class="field-grid">
+        <label class="wide">默认展开来源
+          <span class="checks">
+            <label><input type="checkbox" id="fSrcCT" value="ct"> CT 日志</label>
+            <label><input type="checkbox" id="fSrcWL" value="wordlist"> 字典</label>
+            <label><input type="checkbox" id="fSrcRules" value="rules"> 规则</label>
+          </span>
+        </label>
+        <label>展开并发<input id="fExpandConcurrency" type="number" min="1" max="256"></label>
+        <label>展开超时（秒）<input id="fExpandTimeout" type="number" min="1" max="60"></label>
+        <label>最多子域名<input id="fExpandMax" type="number" min="1" max="1000"></label>
+      </div>
+    </div>
+  </details>
+  <details class="cfg-section">
+    <summary>域名列表</summary>
+    <div class="cfg-body">
+      <div id="domainEditor" class="domain-editor"></div>
+      <div class="bar" style="margin-top:10px">
+        <input id="newDomainName" type="text" placeholder="新增域名，如 example.com" spellcheck="false">
+        <button id="addDomainBtn" type="button">添加域名</button>
+      </div>
+    </div>
+  </details>
+  <details class="cfg-section">
+    <summary>历史记录</summary>
+    <div class="cfg-body">
+      <div class="field-grid">
+        <label>历史保留（月）<input id="fHistoryRetention" type="number" min="1" max="120"></label>
+      </div>
+      <p class="hint" style="margin:8px 0 0">探测历史按月压缩存于状态目录的 history/ 下，超出保留期的分片会自动清理。</p>
+    </div>
+  </details>
+</div>
+
+<div id="cfgJSONWrap" class="cfg-json-wrap">
+  <textarea id="cfg" spellcheck="false"></textarea>
+</div>
+
+<p class="hint">保存前会校验：JSON 格式、域名合法、probe_dns 必须为字面 IP 等。配置会被固化且<strong>不会覆盖</strong>原文件；保存后点「保存并生效」触发新一轮生成。</p>
+<div class="bar">
+<button id="cfgLoad" type="button">重新加载</button>
+<button id="cfgSave" type="button">保存</button>
+<button id="cfgSaveRun" type="button" class="primary">保存并生效</button>
+<span id="cfgMsg"></span>
+</div>
+</details>
+</div>
+
+<div class="card">
+<details id="domainListDetails">
+<summary>域名列表 <span class="summary-meta">有效 {{.ActiveCount}}/{{.DomainCount}}</span></summary>
+<div class="table-tools">
+  <div class="left">
+    <span id="selCount">已选 0 个域名</span>
+    <button id="batchDelete" type="button" class="danger" disabled>删除选中</button>
+    <button id="expandAll" type="button">全部展开</button>
+    <button id="collapseAll" type="button">全部收起</button>
+    <button id="batchRefresh" type="button" disabled>刷新选中</button>
+  </div>
+  <span class="hint" style="margin:0">按主域名分组；点分组标题展开该分类，勾选后可批量刷新或删除</span>
+</div>
+<table><thead>
+<tr>
+  <th class="select-cell"><input type="checkbox" id="selectAll" title="全选筛选结果"></th>
+  <th style="width:24%">域名</th>
+  <th style="width:14%">优选 IP</th>
+  <th style="width:8%">延迟</th>
+  <th style="width:12%">连接状态</th>
+  <th style="width:8%">节点</th>
+  <th style="width:26%">操作</th>
+</tr>
+</thead><tbody>
+{{range $i, $d := .Domains}}
+<tr data-name="{{$d.Name}}" data-ip="{{$d.IP}}" data-reason="{{$d.Reason}}" data-status="{{$d.Validated}}" data-pending="{{$d.Pending}}" data-disabled="{{$d.Disabled}}">
+  <td class="select-cell"><input type="checkbox" class="row-check" value="{{$d.Name}}"></td>
+  <td class="cell-name" title="{{$d.Name}}"><span class="truncate">{{$d.Name}}</span></td>
+  <td class="cell-ip" title="{{$d.IP}}"><span class="truncate">{{$d.IP}}</span></td>
+  <td>{{if $d.IP}}<button type="button" class="latency-btn" data-domain="{{$d.Name}}" title="查看全部候选 IP">{{$d.LatencyMS}} ms</button>{{else}}—{{end}}</td>
+  <td>
+    {{if $d.Disabled}}
+    <span class="status-dot status-unknown"></span>
+    已禁用
+    {{else if $d.Pending}}
+    <span class="status-dot status-unknown"></span>
+    待探测
+    {{else}}
+    <span class="status-dot {{if $d.Validated}}status-ok{{else}}status-fail{{end}}"></span>
+    {{if $d.Validated}}正常{{else}}失败{{end}}
+    {{end}}
+  </td>
+  <td>{{$d.Candidates}}/{{$d.Validated}}</td>
+  <td class="cell-ops">
+    <button type="button" class="expand-btn" data-domain="{{$d.Name}}">展开域名</button>
+    <button type="button" class="refresh-btn" data-domain="{{$d.Name}}" title="单独刷新该域名">刷新</button>
+    <button type="button" class="disable-btn" data-domain="{{$d.Name}}" data-disabled="{{$d.Disabled}}">{{if $d.Disabled}}启用{{else}}禁用{{end}}</button>
+    {{if $d.Reason}}<span class="badge" title="{{$d.Reason}}">{{$d.Reason}}</span>{{end}}
+  </td>
+</tr>
+{{end}}
+</tbody></table>
+
+</details>
+</div>
+
+<div class="card">
+<details id="dnsDetails" open>
+<summary>DNS 应答服务（推荐）</summary>
+<div class="bar">
+  <button id="copyAgh" type="button">复制分流规则</button>
+  <span id="dnsStats"></span>
+</div>
+<pre id="aghLine" class="agh-line" spellcheck="false"></pre>
+<p class="hint">把上面的内容粘贴到 AdGuard Home「设置 → DNS 设置 → 上游 DNS 服务器」末尾。这样 AGH 只把这些域名送到本服务，其余域名与广告过滤不受影响。<strong>该模式与上方的「DNS 重写清单」订阅二选一</strong>，不要同时启用。</p>
+<p class="hint">IP 切换后最多一个 TTL（当前 {{.DNSTTL}} 秒）即可生效，不必等订阅刷新。默认只监听本机回环地址，与 AdGuard Home 同机部署时最安全。</p>
+</details>
+</div>
+
+<div class="card">
+<details id="historyDetails">
+<summary>历史趋势</summary>
+<div class="history-tools">
+  <select id="historyDomain"></select>
+  <select id="historyRange">
+    <option value="1">近 24 小时</option>
+    <option value="7" selected>近 7 天</option>
+    <option value="30">近 30 天</option>
+    <option value="90">近 90 天</option>
+  </select>
+  <button id="historyRefresh" type="button">刷新</button>
+  <span id="historyState"></span>
+</div>
+<div class="trend-wrap"><svg id="trendChart" viewBox="0 0 720 220" role="img" aria-label="平均延迟趋势"></svg></div>
+<div class="history-table-wrap">
+  <table class="history-table">
+    <thead><tr><th>时间</th><th>域名</th><th>优选 IP</th><th>延迟</th><th>状态</th></tr></thead>
+    <tbody id="historyRows"></tbody>
+  </table>
+</div>
+</details>
+</div>
+
+<div class="card">
+<details id="logDetails">
+<summary>运行日志</summary>
+<div class="log-tools">
+  <label><input type="checkbox" id="logAuto" checked> 自动刷新</label>
+  <input id="logFilter" type="text" placeholder="筛选关键字...">
+  <button id="logClear" type="button">清空视图</button>
+  <span id="logState"></span>
+</div>
+<pre id="logView"></pre>
+</details>
+</div>
+
+<div class="card">
+<details id="aboutDetails">
+<summary>关于</summary>
+<div class="about-grid">
+  <div class="about-item"><span class="about-label">版本</span><span class="about-value mono">v{{.Version}}</span></div>
+  <div class="about-item"><span class="about-label">项目地址</span><a class="about-value" href="{{.ProjectURL}}" target="_blank" rel="noopener">{{.ProjectURL}}</a></div>
+</div>
+<div class="about-block">
+  <h4>使用说明</h4>
+  <ol class="about-steps">
+    <li>在「编辑域名清单」中添加域名，或输入主域名后勾选相关子域名批量添加，最后点「保存并生效」。</li>
+    <li>推荐：展开「DNS 应答服务」卡片，复制分流规则，粘贴到 AdGuard Home「设置 → DNS 设置 → 上游 DNS 服务器」末尾。IP 切换后最多一个 TTL 即生效。</li>
+    <li>兼容：也可在 AdGuard Home「过滤器 → DNS 重写清单」添加订阅地址 <code>http://&lt;NAS内网IP&gt;:18088/agh.txt</code>，更新间隔设为 1 小时。<strong>与上一种方式二选一，不要同时启用。</strong></li>
+    <li>需要立即更新时，展开域名分组后勾选并点「刷新选中」；只想重写订阅文件时点「刷新 AGH 规则」。</li>
+    <li>点击延迟数值可查看全部候选 IP 并手动切换；状态表支持按主域名分组以及启用/禁用域名。</li>
+    <li>所有配置项（轮询、探测 DNS、滞回、子域名展开、DNS 应答器、产物与校验）都在「编辑域名清单」的图形化表单内，单域名的高级项点该行「高级」展开；需要时也可切到「JSON 源码」。</li>
+    <li>其他端点：<code>/hosts.txt</code>（hosts 语法）、<code>/status.json</code>（运行状态与统计）、<code>/api/dns</code>（应答器状态与分流规则）。</li>
+  </ol>
+</div>
+<div class="about-foot">管理接口与 DNS 应答器均无登录鉴权，请仅在内网使用；DNS 应答器默认只监听本机回环地址，如需对外监听请自行添加防火墙规则。刷新任务状态保存在进程内存，重启后重新触发即可。</div>
+</details>
+</div>
+
+<div class="modal-overlay" id="expandModal">
+  <div class="modal">
+    <h3>展开域名: <span id="modalDomain" style="font-family:var(--mono);color:var(--accent)"></span></h3>
+    <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
+    <p id="progressText" class="modal-hint">准备中...</p>
+    <div class="result-list" id="resultList"></div>
+    <div class="modal-actions">
+      <button type="button" id="modalClose">关闭</button>
+      <button type="button" id="modalAddAll" class="primary" disabled>全部添加到配置</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="ipModal">
+  <div class="modal">
+    <h3>候选 IP 延时: <span id="ipDomain" style="font-family:var(--mono);color:var(--accent)"></span></h3>
+    <p class="hint" id="ipHint"></p>
+    <div class="result-list" id="ipList"></div>
+    <div class="modal-actions">
+      <button type="button" id="ipClose">关闭</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var inp = document.getElementById("sub");
+  var msg = document.getElementById("msg");
+  var themeSel = document.getElementById("themeSel");
+  // 管理令牌：订阅端点不需要，管理接口需要。令牌存在 localStorage 里随请求发送。
+  var tokenInput = document.getElementById("adminToken");
+  var tokenMsg = document.getElementById("tokenMsg");
+  function currentToken() {
+    try { return localStorage.getItem("ho-admin-token") || ""; } catch (e) { return ""; }
+  }
+  function api(url, opts) {
+    opts = opts || {};
+    var headers = Object.assign({}, opts.headers || {});
+    var t = currentToken();
+    if (t) { headers["X-Admin-Token"] = t; }
+    opts.headers = headers;
+    return fetch(url, opts).then(function (r) {
+      if (r.status === 401) {
+        tokenMsg.textContent = "需要管理令牌：请在上方填写并保存";
+      }
+      return r;
+    });
+  }
+  tokenInput.value = currentToken() || new URLSearchParams(location.search).get("token") || "";
+  document.getElementById("tokenSave").onclick = function () {
+    var v = tokenInput.value.trim();
+    try {
+      if (v) { localStorage.setItem("ho-admin-token", v); } else { localStorage.removeItem("ho-admin-token"); }
+    } catch (e) {}
+    tokenMsg.textContent = v ? "已保存到本浏览器" : "已清除";
+  };
+  var scheme = window.matchMedia("(prefers-color-scheme: dark)");
+  function currentTheme() {
+    try { return localStorage.getItem("ho-theme") || "system"; } catch (e) { return "system"; }
+  }
+  function applyTheme(mode) {
+    var dark = mode === "dark" || (mode === "system" && scheme.matches);
+    document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+    themeSel.value = mode;
+  }
+  applyTheme(currentTheme());
+  themeSel.onchange = function () {
+    try { localStorage.setItem("ho-theme", themeSel.value); } catch (e) {}
+    applyTheme(themeSel.value);
+  };
+  var onSchemeChange = function () {
+    if (currentTheme() === "system") applyTheme("system");
+  };
+  if (scheme.addEventListener) scheme.addEventListener("change", onSchemeChange);
+  else if (scheme.addListener) scheme.addListener(onSchemeChange);
+
+  // DNS 应答服务卡片：拉取运行状态并填充分流规则与计数。
+  (function () {
+    var aghLine = document.getElementById("aghLine");
+    var copyAgh = document.getElementById("copyAgh");
+    var dnsStats = document.getElementById("dnsStats");
+    function fmtTime(s) {
+      if (!s) return "暂无查询";
+      return String(s).replace("T", " ").split(/[+Z]/)[0];
+    }
+    function loadDNS() {
+      api("/api/dns")
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          if (!j.ok) return;
+          if (!j.enabled) {
+            aghLine.textContent = "";
+            copyAgh.disabled = true;
+            dnsStats.textContent = j.hint || "未启用";
+            return;
+          }
+          aghLine.textContent = j.agh_upstream || "";
+          copyAgh.disabled = !j.agh_upstream;
+          dnsStats.textContent = "查询 " + j.queries + " · 应答 " + j.answered +
+            " · NODATA " + j.nodata + " · 拒绝 " + j.refused +
+            " · 畸形 " + j.malformed + " · TTL " + j.ttl + "s" +
+            " · 最近 " + fmtTime(j.last_query_at);
+        })
+        .catch(function () {});
+    }
+    copyAgh.onclick = function () {
+      var text = aghLine.textContent || "";
+      if (!text) return;
+      // pre 元素不能用 select()；用 Range 选中全部文本后交给剪贴板 API。
+      var range = document.createRange();
+      range.selectNodeContents(aghLine);
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      var copied = false;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text);
+          copied = true;
+        }
+      } catch (e) { copied = false; }
+      if (!copied) {
+        try { copied = document.execCommand("copy"); } catch (e) { copied = false; }
+      }
+      sel.removeAllRanges();
+      dnsStats.textContent = copied ? "分流规则已复制" : "复制失败，请手动选择上方文本复制";
+    };
+    loadDNS();
+    setInterval(loadDNS, 5000);
+  })();
+
+  inp.value = location.origin + "/agh.txt";
+  document.getElementById("copy").onclick = function () {
+    inp.select();
+    try { document.execCommand("copy"); msg.textContent = "已复制"; }
+    catch (e) { msg.textContent = "请手动复制上方的地址"; }
+  };
+  var btn = document.getElementById("refresh");
+  // 刷新改为后台任务：POST 拿到 task_id 后轮询状态，避免长请求卡住页面。
+  function startRefresh(statusEl, done, domains, retried) {
+    statusEl.textContent = "正在轮询，请稍等";
+    var opts = { method: "POST" };
+    if (domains && domains.length) {
+      opts.headers = { "Content-Type": "application/json" };
+      opts.body = JSON.stringify({ domains: domains });
+    }
+    api("/refresh", opts)
+      .then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
+      .then(function (x) {
+        if (!x.body.ok || !x.body.task_id) {
+          throw new Error(x.body.error || ("HTTP " + x.status));
+        }
+        var reused = !!x.body.reused;
+        var taskId = x.body.task_id;
+        var timer = setInterval(function () {
+          api("/api/refresh-status?task_id=" + encodeURIComponent(taskId))
+            .then(function (r) { return r.json(); })
+            .then(function (s) {
+              if (s.state === "running") {
+                statusEl.textContent = "正在轮询，请稍等";
+                return;
+              }
+              clearInterval(timer);
+              if (s.state === "done") {
+                if (reused && !retried) {
+                  statusEl.textContent = "上一任务已完成，正在按最新配置重新探测...";
+                  startRefresh(statusEl, done, domains, true);
+                  return;
+                }
+                statusEl.textContent = "完成，AGH 订阅已同步，即将刷新页面";
+                if (done) done(true);
+                setTimeout(function () { location.reload(); }, 600);
+                return;
+              }
+              statusEl.textContent = "失败: " + (s.error || "未知错误");
+              if (done) done(false);
+            })
+            .catch(function (e) {
+              clearInterval(timer);
+              statusEl.textContent = "状态查询失败: " + e;
+              if (done) done(false);
+            });
+        }, 1000);
+      })
+      .catch(function (e) {
+        statusEl.textContent = "请求失败: " + e.message;
+        if (done) done(false);
+      });
+  }
+  btn.onclick = function () {
+    btn.disabled = true;
+    msg.textContent = "正在刷新 AGH 规则...";
+    api("/api/refresh-agh", { method: "POST" })
+      .then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
+      .then(function (x) {
+        btn.disabled = false;
+        if (x.body.ok) {
+          msg.textContent = "AGH 规则已刷新（" + x.body.bytes + " 字节）";
+        } else {
+          msg.textContent = "刷新失败: " + (x.body.error || ("HTTP " + x.status));
+        }
+      })
+      .catch(function (e) {
+        btn.disabled = false;
+        msg.textContent = "请求失败: " + e;
+      });
+  };
+
+  var cfg = document.getElementById("cfg");
+  var cfgMsg = document.getElementById("cfgMsg");
+  var cfgTab = "form";
+  var cfgFormEl = document.getElementById("cfgForm");
+  var cfgJSONWrap = document.getElementById("cfgJSONWrap");
+  var tabFormBtn = document.getElementById("tabForm");
+  var tabJSONBtn = document.getElementById("tabJSON");
+  var domainEditor = document.getElementById("domainEditor");
+
+  function splitList(v) {
+    return String(v || "").split(/[,，\s]+/).map(function (s) { return s.trim(); })
+      .filter(function (s) { return s.length > 0; });
+  }
+  function setNum(obj, key, el, fallback) {
+    var raw = el.value.trim();
+    var n = raw === "" ? NaN : parseInt(raw, 10);
+    obj[key] = isNaN(n) ? fallback : n;
+  }
+  function numTo(el, v, fallback) {
+    el.value = String((v === undefined || v === null || v === "") ? fallback : v);
+  }
+  function advField(labelText, cls, value, type) {
+    var label = document.createElement("label");
+    label.appendChild(document.createTextNode(labelText));
+    var input = document.createElement("input");
+    input.type = type || "text";
+    input.className = cls;
+    input.value = value;
+    label.appendChild(input);
+    return label;
+  }
+  // 布尔型高级项：勾选框比文本输入 true/false 更不易出错
+  function advCheck(labelText, cls, checked) {
+    var label = document.createElement("label");
+    label.className = "adv-check";
+    var input = document.createElement("input");
+    input.type = "checkbox";
+    input.className = cls;
+    input.checked = !!checked;
+    label.appendChild(input);
+    label.appendChild(document.createTextNode(" " + labelText));
+    return label;
+  }
+  function buildDomainRow(d) {
+    var item = document.createElement("div");
+    item.className = "domain-item";
+    item._src = d;
+
+    var main = document.createElement("div");
+    main.className = "domain-main";
+    var name = document.createElement("input");
+    name.type = "text";
+    name.className = "d-name";
+    name.value = d.name || "";
+    name.placeholder = "example.com";
+    name.spellcheck = false;
+
+    var expandLabel = document.createElement("label");
+    var expand = document.createElement("input");
+    expand.type = "checkbox";
+    expand.className = "d-expand";
+    expand.checked = !!d.expand;
+    expandLabel.appendChild(expand);
+    expandLabel.appendChild(document.createTextNode(" 展开子域名"));
+
+    var disabledLabel = document.createElement("label");
+    var disabled = document.createElement("input");
+    disabled.type = "checkbox";
+    disabled.className = "d-disabled";
+    disabled.checked = !!d.disabled;
+    disabledLabel.appendChild(disabled);
+    disabledLabel.appendChild(document.createTextNode(" 禁用"));
+
+    var advBtn = document.createElement("button");
+    advBtn.type = "button";
+    advBtn.textContent = "高级";
+    advBtn.onclick = function () { item.classList.toggle("open"); };
+
+    var delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "danger";
+    delBtn.textContent = "删除";
+    delBtn.onclick = function () { item.remove(); };
+
+    main.appendChild(name);
+    main.appendChild(expandLabel);
+    main.appendChild(disabledLabel);
+    main.appendChild(advBtn);
+    main.appendChild(delBtn);
+
+    var adv = document.createElement("div");
+    adv.className = "domain-adv";
+    adv.appendChild(advField("SNI（留空同域名）", "d-sni", d.sni || ""));
+    adv.appendChild(advField("端口（留空用默认）", "d-port", d.port ? String(d.port) : "", "number"));
+    adv.appendChild(advField("候选 IP（逗号分隔）", "d-cands", (d.candidates || []).join(", ")));
+    adv.appendChild(advField("展开来源（ct/wordlist/rules）", "d-sources", (d.expand_sources || []).join(", ")));
+    adv.appendChild(advField("HTTP 状态码白名单", "d-expect", (d.expect_status || []).join(", ")));
+    // 三个布尔项做成勾选框，避免用户手拼 true/false
+    adv.appendChild(advCheck("允许私网 IP", "d-private", !!d.allow_private));
+    adv.appendChild(advCheck("抑制 AAAA 记录", "d-noaaaa", d.suppress_aaaa !== false));
+
+    item.appendChild(main);
+    item.appendChild(adv);
+    return item;
+  }
+  function fillForm(raw) {
+    var obj;
+    try {
+      obj = JSON.parse(raw || "{}");
+    } catch (e) {
+      cfgMsg.textContent = "JSON 解析失败，请先在 JSON 模式修正: " + e.message;
+      return false;
+    }
+    var d = obj.defaults || {};
+    numTo(document.getElementById("fSchedule"), d.schedule_minutes, 60);
+    numTo(document.getElementById("fPort"), d.probe_port, 443);
+    numTo(document.getElementById("fConcurrency"), d.concurrency, 20);
+    numTo(document.getElementById("fMaxCandidates"), d.max_candidates, 64);
+    numTo(document.getElementById("fTCPRounds"), d.tcp_rounds, 3);
+    numTo(document.getElementById("fTimeout"), d.timeout_seconds, 3);
+    numTo(document.getElementById("fHystPct"), d.hysteresis_percent, 0);
+    numTo(document.getElementById("fHystRounds"), d.hysteresis_rounds, 2);
+    numTo(document.getElementById("fExpandConcurrency"), d.expand_concurrency, 10);
+    numTo(document.getElementById("fExpandTimeout"), d.expand_timeout_seconds, 10);
+    numTo(document.getElementById("fExpandMax"), d.expand_max_subdomains, 50);
+    numTo(document.getElementById("fHistoryRetention"), d.history_retention_months, 12);
+    var dnsList = (d.probe_dns && d.probe_dns.length) ? d.probe_dns : ["223.5.5.5", "119.29.29.29"];
+    document.getElementById("fProbeDNS").value = dnsList.join(", ");
+    var srcs = (d.expand_sources && d.expand_sources.length) ? d.expand_sources : ["wordlist", "rules"];
+    document.getElementById("fSrcCT").checked = srcs.indexOf("ct") >= 0;
+    document.getElementById("fSrcWL").checked = srcs.indexOf("wordlist") >= 0;
+    document.getElementById("fSrcRules").checked = srcs.indexOf("rules") >= 0;
+    // DNS 应答器：空值回落默认，off 类词表原样回显便于识别
+    var dns = d.dns || {};
+    document.getElementById("fDNSListen").value = dns.listen || "";
+    numTo(document.getElementById("fDNSTTL"), dns.ttl, 60);
+    // 产物与校验
+    var outs = (d.outputs && d.outputs.length) ? d.outputs : ["hosts.txt", "agh.txt", "status.json"];
+    document.getElementById("fOutHosts").checked = outs.indexOf("hosts.txt") >= 0;
+    document.getElementById("fOutAGH").checked = outs.indexOf("agh.txt") >= 0;
+    document.getElementById("fOutStatus").checked = outs.indexOf("status.json") >= 0;
+    var es = (d.expect_status && d.expect_status.length) ? d.expect_status : [];
+    document.getElementById("fExpectStatus").value = es.join(", ");
+
+    domainEditor.innerHTML = "";
+    var list = Array.isArray(obj.domains) ? obj.domains : [];
+    list.forEach(function (dom) {
+      if (!dom || !dom.name) return;
+      var copy = {};
+      Object.keys(dom).forEach(function (k) { copy[k] = dom[k]; });
+      domainEditor.appendChild(buildDomainRow(copy));
+    });
+    if (domainEditor.children.length === 0) {
+      var empty = document.createElement("p");
+      empty.className = "domain-empty";
+      empty.textContent = "还没有域名，可在下方新增，或用上方「获取域名列表」批量添加";
+      domainEditor.appendChild(empty);
+    }
+    return true;
+  }
+  function formToConfig() {
+    var obj;
+    try {
+      obj = JSON.parse(cfg.value || "{}");
+    } catch (e) {
+      throw new Error("JSON 源码有误，请先切到 JSON 模式修正: " + e.message);
+    }
+    if (!obj.defaults) obj.defaults = {};
+    var d = obj.defaults;
+    setNum(d, "schedule_minutes", document.getElementById("fSchedule"), 60);
+    setNum(d, "probe_port", document.getElementById("fPort"), 443);
+    setNum(d, "concurrency", document.getElementById("fConcurrency"), 20);
+    setNum(d, "max_candidates", document.getElementById("fMaxCandidates"), 64);
+    setNum(d, "tcp_rounds", document.getElementById("fTCPRounds"), 3);
+    setNum(d, "timeout_seconds", document.getElementById("fTimeout"), 3);
+    setNum(d, "hysteresis_percent", document.getElementById("fHystPct"), 0);
+    setNum(d, "hysteresis_rounds", document.getElementById("fHystRounds"), 2);
+    setNum(d, "expand_concurrency", document.getElementById("fExpandConcurrency"), 10);
+    setNum(d, "expand_timeout_seconds", document.getElementById("fExpandTimeout"), 10);
+    setNum(d, "expand_max_subdomains", document.getElementById("fExpandMax"), 50);
+    setNum(d, "history_retention_months", document.getElementById("fHistoryRetention"), 12);
+    var dns = splitList(document.getElementById("fProbeDNS").value);
+    d.probe_dns = dns.length ? dns : ["223.5.5.5", "119.29.29.29"];
+    var srcs = [];
+    if (document.getElementById("fSrcCT").checked) srcs.push("ct");
+    if (document.getElementById("fSrcWL").checked) srcs.push("wordlist");
+    if (document.getElementById("fSrcRules").checked) srcs.push("rules");
+    d.expand_sources = srcs.length ? srcs : ["wordlist", "rules"];
+
+    // DNS 应答器：空串不写入（沿用磁盘值），off 类词表照写，其余校验 host:port
+    var listenVal = document.getElementById("fDNSListen").value.trim();
+    var offWords = { off: 1, disabled: 1, none: 1, "0": 1, "false": 1 };
+    if (listenVal === "") {
+      delete d.dns;
+    } else {
+      if (!d.dns) d.dns = {};
+      if (offWords[listenVal.toLowerCase()]) {
+        d.dns.listen = listenVal.toLowerCase();
+      } else {
+        d.dns.listen = listenVal;
+      }
+      setNum(d.dns, "ttl", document.getElementById("fDNSTTL"), 60);
+    }
+
+    // 产物与校验
+    var outs = [];
+    if (document.getElementById("fOutHosts").checked) outs.push("hosts.txt");
+    if (document.getElementById("fOutAGH").checked) outs.push("agh.txt");
+    if (document.getElementById("fOutStatus").checked) outs.push("status.json");
+    if (outs.length) d.outputs = outs;
+    var esCodes = splitList(document.getElementById("fExpectStatus").value)
+      .map(function (s) { return parseInt(s, 10); })
+      .filter(function (n) { return !isNaN(n) && n >= 100 && n <= 599; });
+    if (esCodes.length) d.expect_status = esCodes;
+
+    var domains = [];
+    Array.prototype.forEach.call(domainEditor.querySelectorAll(".domain-item"), function (item) {
+      var src = item._src || {};
+      var base = {};
+      Object.keys(src).forEach(function (k) { base[k] = src[k]; });
+      var name = item.querySelector(".d-name").value.trim().toLowerCase();
+      if (!name) return;
+      base.name = name;
+      base.expand = item.querySelector(".d-expand").checked;
+      if (item.querySelector(".d-disabled").checked) {
+        base.disabled = true;
+      } else {
+        delete base.disabled;
+      }
+      var sni = item.querySelector(".d-sni").value.trim();
+      if (sni) base.sni = sni; else delete base.sni;
+      var port = item.querySelector(".d-port").value.trim();
+      if (port) {
+        var p = parseInt(port, 10);
+        if (!isNaN(p)) base.port = p;
+      } else {
+        delete base.port;
+      }
+      var cands = splitList(item.querySelector(".d-cands").value);
+      if (cands.length) base.candidates = cands; else delete base.candidates;
+      var es = splitList(item.querySelector(".d-sources").value);
+      if (es.length) base.expand_sources = es; else delete base.expand_sources;
+      var exp = splitList(item.querySelector(".d-expect").value)
+        .map(function (s) { return parseInt(s, 10); })
+        .filter(function (n) { return !isNaN(n) && n >= 100 && n <= 599; });
+      if (exp.length) base.expect_status = exp; else delete base.expect_status;
+      if (item.querySelector(".d-private").checked) base.allow_private = true;
+      else delete base.allow_private;
+      // suppress_aaaa 默认 true：仅当用户显式取消勾选时才写入 false
+      if (item.querySelector(".d-noaaaa").checked) delete base.suppress_aaaa;
+      else base.suppress_aaaa = false;
+      domains.push(base);
+    });
+    obj.domains = domains;
+    cfg.value = JSON.stringify(obj, null, 2);
+  }
+  function syncFormIfNeeded() {
+    if (cfgTab === "form") formToConfig();
+  }
+  function setTab(tab) {
+    if (tab === cfgTab) return;
+    if (tab === "json") {
+      try {
+        formToConfig();
+      } catch (e) {
+        cfgMsg.textContent = e.message;
+        return;
+      }
+    } else if (!fillForm(cfg.value)) {
+      return;
+    }
+    cfgTab = tab;
+    var isForm = tab === "form";
+    cfgFormEl.classList.toggle("active", isForm);
+    cfgJSONWrap.classList.toggle("active", !isForm);
+    tabFormBtn.classList.toggle("active", isForm);
+    tabJSONBtn.classList.toggle("active", !isForm);
+    cfgMsg.textContent = "";
+  }
+  tabFormBtn.onclick = function () { setTab("form"); };
+  tabJSONBtn.onclick = function () { setTab("json"); };
+
+  document.getElementById("addDomainBtn").onclick = function () {
+    var input = document.getElementById("newDomainName");
+    var name = input.value.trim().toLowerCase();
+    if (!name) { input.focus(); return; }
+    var empty = domainEditor.querySelector(".domain-empty");
+    if (empty) empty.remove();
+    var item = buildDomainRow({ name: name, expand: false });
+    domainEditor.appendChild(item);
+    input.value = "";
+    item.scrollIntoView({ block: "nearest" });
+  };
+  document.getElementById("newDomainName").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      document.getElementById("addDomainBtn").click();
+    }
+  });
+
+  function loadCfg() {
+    cfgMsg.textContent = "加载中...";
+    api("/api/domains")
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (j.ok) {
+          cfg.value = j.raw;
+          cfgMsg.textContent = "";
+          if (cfgTab === "form") fillForm(j.raw);
+        } else {
+          cfgMsg.textContent = "加载失败: " + (j.error || "未知错误");
+        }
+      })
+      .catch(function (e) { cfgMsg.textContent = "加载失败: " + e; });
+  }
+  function saveCfg(thenRun) {
+    if (cfgTab === "form") {
+      try {
+        formToConfig();
+      } catch (e) {
+        cfgMsg.textContent = e.message;
+        return;
+      }
+    }
+    cfgMsg.textContent = "保存中...";
+    api("/api/domains", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: cfg.value
+    }).then(function (r) {
+      return r.json().then(function (j) { return { status: r.status, body: j }; });
+    }).then(function (x) {
+      if (!x.body.ok) {
+        cfgMsg.textContent = "保存失败: " + (x.body.error || ("HTTP " + x.status));
+        return;
+      }
+      if (!thenRun) {
+        cfgMsg.textContent = "已保存，正在刷新列表...";
+        setTimeout(function () { location.reload(); }, 400);
+        return;
+      }
+      startRefresh(cfgMsg);
+    }).catch(function (e) { cfgMsg.textContent = "保存失败: " + e; });
+  }
+  document.getElementById("cfgLoad").onclick = loadCfg;
+  document.getElementById("cfgSave").onclick = function () { saveCfg(false); };
+  document.getElementById("cfgSaveRun").onclick = function () { saveCfg(true); };
+  loadCfg();
+
+  // 域名发现：输入主域名 -> 获取相关子域名 -> 勾选 -> 添加到配置
+  var discoverInput = document.getElementById("discoverInput");
+  var discoverBtn = document.getElementById("discoverBtn");
+  var discoverDropdown = document.getElementById("discoverDropdown");
+  var discoverToggle = document.getElementById("discoverToggle");
+  var discoverListEl = document.getElementById("discoverList");
+  var discoverAll = document.getElementById("discoverAll");
+  var discoverCount = document.getElementById("discoverCount");
+  var discoverAdd = document.getElementById("discoverAdd");
+  var discoverMsg = document.getElementById("discoverMsg");
+  var discoverSummary = document.getElementById("discoverSummary");
+  var discovered = [];
+
+  function openDropdown(open) {
+    discoverDropdown.classList.toggle("open", open);
+  }
+  discoverToggle.onclick = function () {
+    openDropdown(!discoverDropdown.classList.contains("open"));
+  };
+  document.addEventListener("click", function (e) {
+    if (!discoverDropdown.contains(e.target)) openDropdown(false);
+  });
+
+  function checkedDomains() {
+    return discovered.filter(function (r) { return r.checked && r.resolved; })
+      .map(function (r) { return r.domain; });
+  }
+  function refreshDiscoverState() {
+    var n = checkedDomains().length;
+    discoverCount.textContent = String(n);
+    discoverAdd.disabled = n === 0;
+    var resolvedList = discovered.filter(function (r) { return r.resolved; });
+    discoverSummary.textContent = discovered.length
+      ? "共 " + discovered.length + " 个，" + resolvedList.length + " 个可解析"
+      : "尚未获取";
+    discoverAll.disabled = resolvedList.length === 0;
+    discoverAll.checked = resolvedList.length > 0 && resolvedList.every(function (r) { return r.checked; });
+  }
+  function renderDiscovered() {
+    discoverListEl.innerHTML = "";
+    if (discovered.length === 0) {
+      var empty = document.createElement("div");
+      empty.className = "dropdown-empty";
+      empty.textContent = "没有发现可用的相关域名";
+      discoverListEl.appendChild(empty);
+      refreshDiscoverState();
+      return;
+    }
+    discovered.forEach(function (r) {
+      var item = document.createElement("label");
+      item.className = "dropdown-item" + (r.resolved ? "" : " disabled");
+      var box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = r.checked;
+      box.disabled = !r.resolved;
+      box.onchange = function () { r.checked = box.checked; refreshDiscoverState(); };
+      var name = document.createElement("span");
+      name.className = "domain";
+      name.textContent = r.domain;
+      name.title = r.domain;
+      var meta = document.createElement("span");
+      meta.className = "meta";
+      if (r.resolved) {
+        meta.textContent = (r.ips && r.ips.length ? r.ips[0] : "") +
+          (r.ips && r.ips.length > 1 ? " +" + (r.ips.length - 1) : "");
+      } else {
+        meta.textContent = "不可解析";
+      }
+      item.appendChild(box);
+      item.appendChild(name);
+      item.appendChild(meta);
+      discoverListEl.appendChild(item);
+    });
+    refreshDiscoverState();
+  }
+
+  discoverAll.onchange = function () {
+    var checked = discoverAll.checked;
+    discovered.forEach(function (r) { if (r.resolved) r.checked = checked; });
+    renderDiscovered();
+  };
+
+  discoverBtn.onclick = function () {
+    var raw = discoverInput.value.trim();
+    if (!raw) {
+      discoverMsg.textContent = "请先输入主域名，如 github.com";
+      discoverInput.focus();
+      return;
+    }
+    raw = raw.replace(/^[a-zA-Z]+:\/\//, "").replace(/\/.*$/, "").toLowerCase();
+    discoverBtn.disabled = true;
+    discoverMsg.textContent = "正在发现 " + raw + " 的相关域名...";
+    discovered = [];
+    renderDiscovered();
+    api("/api/expand", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ domain: raw, sources: ["ct", "wordlist", "rules"] })
+    }).then(function (r) { return r.json(); })
+      .then(function (j) {
+        discoverBtn.disabled = false;
+        if (!j.ok) {
+          discoverMsg.textContent = "获取失败: " + (j.error || "未知错误");
+          return;
+        }
+        discovered = (j.results || []).map(function (r) {
+          return { domain: r.domain, resolved: !!r.resolved, ips: r.ips || [], checked: !!r.resolved };
+        }).sort(function (a, b) {
+          if (a.resolved !== b.resolved) return a.resolved ? -1 : 1;
+          return a.domain < b.domain ? -1 : (a.domain > b.domain ? 1 : 0);
+        });
+        renderDiscovered();
+        var resolvedCount = discovered.filter(function (r) { return r.resolved; }).length;
+        discoverToggle.disabled = discovered.length === 0;
+        discoverMsg.textContent = "发现 " + discovered.length + " 个相关域名，" +
+          resolvedCount + " 个可解析，已默认勾选可解析项。";
+        if (discovered.length > 0) openDropdown(true);
+      })
+      .catch(function (e) {
+        discoverBtn.disabled = false;
+        discoverMsg.textContent = "请求失败: " + e;
+      });
+  };
+  discoverInput.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      discoverBtn.click();
+    }
+  });
+
+  discoverAdd.onclick = function () {
+    var names = checkedDomains();
+    if (names.length === 0) return;
+    try {
+      syncFormIfNeeded();
+    } catch (e) {
+      discoverMsg.textContent = e.message;
+      return;
+    }
+    var cfgObj;
+    try {
+      cfgObj = JSON.parse(cfg.value);
+    } catch (e) {
+      discoverMsg.textContent = "配置解析失败，请先修正 domains.json 再添加";
+      return;
+    }
+    if (!Array.isArray(cfgObj.domains)) cfgObj.domains = [];
+    var existing = new Set(cfgObj.domains.map(function (d) { return d && d.name; }));
+    var added = 0;
+    names.forEach(function (n) {
+      if (!existing.has(n)) {
+        cfgObj.domains.push({ name: n, expand: false });
+        existing.add(n);
+        added++;
+      }
+    });
+    if (added > 0) {
+      cfg.value = JSON.stringify(cfgObj, null, 2);
+      if (cfgTab === "form") fillForm(cfg.value);
+      discoverMsg.textContent = "已添加 " + added + " 个域名到配置，请点下方「保存并生效」写入";
+      cfgMsg.textContent = "待保存：" + added + " 个新域名";
+      openDropdown(false);
+    } else {
+      discoverMsg.textContent = "勾选的域名都已存在于配置中";
+    }
+  };
+
+  // 按主域名分组：点击分组标题展开该分类下的全部域名
+  var searchInput = document.getElementById("search");
+  var statusFilter = document.getElementById("statusFilter");
+  var tbody = document.querySelector("tbody");
+  var rows = Array.prototype.slice.call(tbody.querySelectorAll("tr"));
+  var filteredRows = [];
+  var groups = [];
+  var multiSuffix = {
+    "com.cn": 1, "net.cn": 1, "org.cn": 1, "gov.cn": 1, "edu.cn": 1,
+    "co.uk": 1, "org.uk": 1, "ac.uk": 1,
+    "com.hk": 1, "com.tw": 1, "com.sg": 1, "com.au": 1, "com.br": 1,
+    "co.jp": 1, "co.kr": 1, "co.in": 1, "co.nz": 1, "co.za": 1,
+    "com.ru": 1, "com.mx": 1
+  };
+
+  // 分组展开状态只由用户手动操作写入；禁用/切换/刷新导致页面重载时据此恢复，
+  // 绝不因为一次禁用或勾选就自动收起所有分组。
+  function readGroupOpenState() {
+    try { return JSON.parse(localStorage.getItem("ho-group-open") || "{}"); }
+    catch (e) { return {}; }
+  }
+  function writeGroupOpenState(state) {
+    try { localStorage.setItem("ho-group-open", JSON.stringify(state)); } catch (e) {}
+  }
+  function setGroupOpen(g, open, persist) {
+    g.open = open;
+    g.head.classList.toggle("open", open);
+    g.caret.textContent = open ? "▼" : "▶";
+    if (persist) {
+      var state = readGroupOpenState();
+      state[g.base] = open;
+      writeGroupOpenState(state);
+    }
+  }
+
+  function baseDomain(name) {
+    var parts = String(name || "").toLowerCase().split(".").filter(Boolean);
+    if (parts.length <= 2) return parts.join(".");
+    var lastTwo = parts.slice(-2).join(".");
+    if (multiSuffix[lastTwo]) return parts.slice(-3).join(".");
+    return lastTwo;
+  }
+
+  function buildGroups() {
+    var map = {};
+    var savedOpen = readGroupOpenState();
+    rows.forEach(function (tr) {
+      var base = baseDomain(tr.dataset.name);
+      if (!map[base]) {
+        map[base] = { base: base, rows: [], open: !!savedOpen[base], visible: [] };
+        groups.push(map[base]);
+      }
+      map[base].rows.push(tr);
+    });
+    groups.sort(function (a, b) { return a.base < b.base ? -1 : (a.base > b.base ? 1 : 0); });
+    tbody.innerHTML = "";
+    groups.forEach(function (g) {
+      g.rows.sort(function (a, b) {
+        return a.dataset.name < b.dataset.name ? -1 : (a.dataset.name > b.dataset.name ? 1 : 0);
+      });
+      var head = document.createElement("tr");
+      head.className = "group-row";
+      var cell = document.createElement("td");
+      cell.colSpan = 7;
+      var wrap = document.createElement("div");
+      wrap.className = "group-head";
+
+      var toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "group-toggle";
+      var caret = document.createElement("span");
+      caret.className = "caret";
+      caret.textContent = g.open ? "▼" : "▶";
+      var groupName = document.createElement("span");
+      groupName.className = "group-name";
+      groupName.textContent = g.base;
+      // 主域名被省略时，悬停可看完整名称
+      toggle.title = g.base;
+      var count = document.createElement("span");
+      count.className = "group-count";
+      var ok = document.createElement("span");
+      ok.className = "group-ok";
+      toggle.appendChild(caret);
+      toggle.appendChild(groupName);
+      toggle.appendChild(count);
+      toggle.appendChild(ok);
+
+      var selectLabel = document.createElement("label");
+      selectLabel.className = "group-select";
+      var groupCheck = document.createElement("input");
+      groupCheck.type = "checkbox";
+      selectLabel.appendChild(groupCheck);
+      selectLabel.appendChild(document.createTextNode(" 全选本组"));
+
+      var disableLabel = document.createElement("label");
+      disableLabel.className = "group-select";
+      var groupDisable = document.createElement("input");
+      groupDisable.type = "checkbox";
+      disableLabel.appendChild(groupDisable);
+      disableLabel.appendChild(document.createTextNode(" 禁用本组"));
+
+      // 右侧操作区独立成组：长主域名时标题省略，勾选/禁用换行而不是重叠
+      var actions = document.createElement("div");
+      actions.className = "group-actions";
+      actions.appendChild(selectLabel);
+      actions.appendChild(disableLabel);
+
+      wrap.appendChild(toggle);
+      wrap.appendChild(actions);
+      cell.appendChild(wrap);
+      head.appendChild(cell);
+      tbody.appendChild(head);
+      g.rows.forEach(function (tr) {
+        tr.classList.add("domain-row", "table-row-hidden");
+        tbody.appendChild(tr);
+      });
+
+      g.head = head;
+      g.caret = caret;
+      g.count = count;
+      g.ok = ok;
+      g.check = groupCheck;
+      g.disableCheck = groupDisable;
+
+      toggle.onclick = function () {
+        setGroupOpen(g, !g.open, true);
+        applyFilter();
+      };
+      head.classList.toggle("open", g.open);
+      groupCheck.onchange = function () {
+        g.visible.forEach(function (tr) {
+          var c = tr.querySelector(".row-check");
+          if (c) c.checked = groupCheck.checked;
+        });
+        updateSelection();
+      };
+      groupDisable.onchange = function () {
+        var names = g.rows.map(function (tr) { return tr.dataset.name; });
+        if (names.length === 0) return;
+        var wantDisabled = groupDisable.checked;
+        groupDisable.disabled = true;
+        applyDisable(names, wantDisabled, function (ok) {
+          groupDisable.disabled = false;
+          if (ok) {
+            msg.textContent = (wantDisabled ? "已禁用 " : "已启用 ") + names.length + " 个域名";
+            setTimeout(function () { location.reload(); }, 600);
+          } else {
+            groupDisable.checked = !wantDisabled;
+          }
+        });
+      };
+    });
+  }
+
+  function applyFilter() {
+    var kw = searchInput.value.trim().toLowerCase();
+    var st = statusFilter.value;
+    filteredRows = [];
+    groups.forEach(function (g) {
+      var visible = g.rows.filter(function (tr) {
+        var name = (tr.dataset.name || "").toLowerCase();
+        var ip = (tr.dataset.ip || "").toLowerCase();
+        var reason = (tr.dataset.reason || "").toLowerCase();
+        var validated = tr.dataset.status === "true";
+        var pending = tr.dataset.pending === "true";
+        var disabled = tr.dataset.disabled === "true";
+        var match = !kw || name.indexOf(kw) >= 0 || ip.indexOf(kw) >= 0 || reason.indexOf(kw) >= 0;
+        var statusMatch = st === "all" || (st === "ok" && validated) ||
+          (st === "fail" && !validated && !pending && !disabled) ||
+          (st === "pending" && pending && !disabled) ||
+          (st === "disabled" && disabled);
+        return match && statusMatch;
+      });
+      g.visible = visible;
+      filteredRows = filteredRows.concat(visible);
+      g.head.classList.toggle("table-row-hidden", visible.length === 0);
+      // 搜索命中时临时展开以露出结果，但不写入持久状态：清空关键词后
+      // 仍按用户上次的手动选择显示，避免搜索意外改变分组开合。
+      if (kw && visible.length > 0 && !g.open) {
+        g.open = true;
+        g.head.classList.add("open");
+        g.caret.textContent = "▼";
+        g.autoOpened = true;
+      } else if (!kw && g.autoOpened) {
+        g.open = false;
+        g.head.classList.remove("open");
+        g.caret.textContent = "▶";
+        g.autoOpened = false;
+      }
+      g.rows.forEach(function (tr) {
+        tr.classList.toggle("table-row-hidden", !g.open || visible.indexOf(tr) < 0);
+      });
+      var okCount = visible.filter(function (tr) { return tr.dataset.status === "true"; }).length;
+      g.count.textContent = visible.length + " 个域名";
+      g.ok.textContent = okCount + " 正常";
+      g.ok.className = "group-ok" + (visible.length - okCount > 0 ? " has-bad" : "");
+      if (g.disableCheck) {
+        var allDisabled = visible.length > 0 && visible.every(function (tr) {
+          return tr.dataset.disabled === "true";
+        });
+        g.disableCheck.checked = allDisabled;
+        g.disableCheck.indeterminate = !allDisabled && visible.some(function (tr) {
+          return tr.dataset.disabled === "true";
+        });
+      }
+    });
+    updateSelection();
+  }
+
+  searchInput.addEventListener("input", applyFilter);
+  statusFilter.addEventListener("change", applyFilter);
+
+  // 启用/禁用域名（立即写回配置并从产物移除）
+  function applyDisable(names, disabled, done) {
+    api("/api/disable", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ names: names, disabled: disabled })
+    }).then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
+      .then(function (x) {
+        if (!x.body.ok) {
+          msg.textContent = "操作失败: " + (x.body.error || ("HTTP " + x.status));
+          if (done) done(false);
+          return;
+        }
+        if (done) done(true);
+      })
+      .catch(function (e) {
+        msg.textContent = "请求失败: " + e;
+        if (done) done(false);
+      });
+  }
+  document.querySelectorAll(".disable-btn").forEach(function (btn) {
+    btn.onclick = function () {
+      var name = btn.dataset.domain;
+      var wantDisabled = btn.dataset.disabled !== "true";
+      btn.disabled = true;
+      applyDisable([name], wantDisabled, function (ok) {
+        btn.disabled = false;
+        if (ok) {
+          msg.textContent = (wantDisabled ? "已禁用 " : "已启用 ") + name;
+          setTimeout(function () { location.reload(); }, 600);
+        }
+      });
+    };
+  });
+
+  // 表格勾选与批量删除
+  var selectAll = document.getElementById("selectAll");
+  var selCount = document.getElementById("selCount");
+  var batchDelete = document.getElementById("batchDelete");
+  var expandAllBtn = document.getElementById("expandAll");
+  var collapseAllBtn = document.getElementById("collapseAll");
+  var batchRefresh = document.getElementById("batchRefresh");
+
+  function rowChecks() {
+    return Array.prototype.slice.call(document.querySelectorAll(".row-check"));
+  }
+  function selectedNames() {
+    return rowChecks().filter(function (c) { return c.checked; })
+      .map(function (c) { return c.value; });
+  }
+  function updateSelection() {
+    var total = selectedNames().length;
+    selCount.textContent = "已选 " + total + " 个域名";
+    batchDelete.disabled = total === 0;
+    batchRefresh.disabled = total === 0;
+    selectAll.checked = filteredRows.length > 0 && filteredRows.every(function (tr) {
+      var c = tr.querySelector(".row-check");
+      return c && c.checked;
+    });
+    selectAll.indeterminate = !selectAll.checked && filteredRows.some(function (tr) {
+      var c = tr.querySelector(".row-check");
+      return c && c.checked;
+    });
+    groups.forEach(function (g) {
+      var checkedCount = g.visible.filter(function (tr) {
+        var c = tr.querySelector(".row-check");
+        return c && c.checked;
+      }).length;
+      g.check.disabled = g.visible.length === 0;
+      g.check.checked = g.visible.length > 0 && checkedCount === g.visible.length;
+      g.check.indeterminate = checkedCount > 0 && checkedCount < g.visible.length;
+    });
+  }
+  selectAll.onchange = function () {
+    filteredRows.forEach(function (tr) {
+      var c = tr.querySelector(".row-check");
+      if (c) c.checked = selectAll.checked;
+    });
+    updateSelection();
+  };
+  document.querySelectorAll(".row-check").forEach(function (c) {
+    c.onchange = updateSelection;
+  });
+  expandAllBtn.onclick = function () {
+    groups.forEach(function (g) {
+      setGroupOpen(g, true, true);
+    });
+    applyFilter();
+  };
+  collapseAllBtn.onclick = function () {
+    groups.forEach(function (g) {
+      setGroupOpen(g, false, true);
+    });
+    applyFilter();
+  };
+  batchRefresh.onclick = function () {
+    var names = selectedNames();
+    if (names.length === 0) return;
+    batchRefresh.disabled = true;
+    batchRefresh.textContent = "刷新中...";
+    msg.textContent = "正在刷新选中的 " + names.length + " 个域名...";
+    startRefresh(msg, function () {
+      batchRefresh.disabled = false;
+      batchRefresh.textContent = "刷新选中";
+    }, names);
+  };
+  batchDelete.onclick = function () {
+    var names = selectedNames();
+    if (names.length === 0) return;
+    if (!confirm("确定从配置中删除选中的 " + names.length + " 个域名？删除后需点「保存并生效」。")) return;
+    try {
+      syncFormIfNeeded();
+    } catch (e) {
+      msg.textContent = e.message;
+      return;
+    }
+    var cfgObj;
+    try {
+      cfgObj = JSON.parse(cfg.value);
+    } catch (e) {
+      msg.textContent = "配置解析失败: " + e;
+      return;
+    }
+    var remove = new Set(names);
+    var before = Array.isArray(cfgObj.domains) ? cfgObj.domains.length : 0;
+    cfgObj.domains = (cfgObj.domains || []).filter(function (d) {
+      return !(d && remove.has(d.name));
+    });
+    var removed = before - cfgObj.domains.length;
+    cfg.value = JSON.stringify(cfgObj, null, 2);
+    if (cfgTab === "form") fillForm(cfg.value);
+    cfgMsg.textContent = "已从配置移除 " + removed + " 个域名，请点「保存并生效」写入";
+    msg.textContent = "已移除 " + removed + " 个域名";
+    var details = document.querySelector("details");
+    if (details) {
+      details.open = true;
+      details.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    updateSelection();
+  };
+
+  buildGroups();
+  applyFilter();
+
+  // 展开域名模态框
+  var modal = document.getElementById("expandModal");
+  var modalDomain = document.getElementById("modalDomain");
+  var progressBar = document.getElementById("progressBar");
+  var progressText = document.getElementById("progressText");
+  var resultList = document.getElementById("resultList");
+  var modalClose = document.getElementById("modalClose");
+  var modalAddAll = document.getElementById("modalAddAll");
+  var currentExpandDomain = "";
+  var expandResults = [];
+
+  function sourceLabel(src) {
+    var map = {ct:"CT日志", wordlist:"字典", rules:"规则"};
+    return map[src] || src;
+  }
+  function sourceClass(src) {
+    var map = {ct:"badge-ct", wordlist:"badge-wl", rules:"badge-rl"};
+    return map[src] || "";
+  }
+
+  document.querySelectorAll(".expand-btn").forEach(function(btn) {
+    btn.onclick = function() {
+      var domain = btn.dataset.domain;
+      currentExpandDomain = domain;
+      modalDomain.textContent = domain;
+      progressBar.style.width = "0%";
+      progressBar.style.background = "";
+      progressText.textContent = "正在查询子域名...";
+      resultList.innerHTML = "";
+      modalAddAll.disabled = true;
+      modal.classList.add("show");
+      doExpand(domain);
+    };
+  });
+
+  function doExpand(domain) {
+    progressBar.style.width = "0%";
+    progressBar.style.background = "";
+    api("/api/expand", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ domain: domain, sources: ["ct","wordlist","rules"] })
+    }).then(function(r) { return r.json(); })
+      .then(function(j) {
+        if (!j.ok) {
+          progressText.textContent = "失败: " + (j.error || "未知错误");
+          progressBar.style.width = "100%";
+          progressBar.style.background = "#f44336";
+          renderEmpty("查询失败，请稍后重试", true);
+          return;
+        }
+        expandResults = j.results || [];
+        renderResults();
+        progressBar.style.width = "100%";
+        progressText.textContent = "完成: 共 " + expandResults.length + " 个子域名，" + expandResults.filter(function(r){return r.resolved}).length + " 个可解析";
+        modalAddAll.disabled = expandResults.length === 0;
+      })
+      .catch(function(e) {
+        progressText.textContent = "请求失败: " + e.message;
+        progressBar.style.width = "100%";
+        progressBar.style.background = "#f44336";
+        renderEmpty("网络请求失败，请检查连接后重试", true);
+      });
+  }
+
+  function renderEmpty(text, retry) {
+    resultList.innerHTML = "";
+    var box = document.createElement("div");
+    box.className = "modal-empty";
+    var tip = document.createElement("div");
+    tip.textContent = text;
+    box.appendChild(tip);
+    if (retry) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = "重试";
+      btn.onclick = function () {
+        progressText.textContent = "正在重新查询子域名...";
+        resultList.innerHTML = "";
+        doExpand(modalDomain.textContent);
+      };
+      box.appendChild(btn);
+    }
+    resultList.appendChild(box);
+  }
+
+  function renderResults() {
+    resultList.innerHTML = "";
+    if (expandResults.length === 0) {
+      renderEmpty("未发现相关子域名，可稍后重试或更换主域名", false);
+      return;
+    }
+    expandResults.forEach(function(r) {
+      var item = document.createElement("div");
+      item.className = "result-item " + (r.resolved ? "result-ok" : "result-fail");
+      var dot = document.createElement("span");
+      dot.className = "result-dot";
+      var main = document.createElement("div");
+      main.className = "result-main";
+      var line = document.createElement("div");
+      line.className = "result-line";
+      var domain = document.createElement("span");
+      domain.className = "result-domain";
+      domain.textContent = r.domain;
+      var source = document.createElement("span");
+      source.className = "result-source " + sourceClass(r.source);
+      source.textContent = sourceLabel(r.source);
+      line.appendChild(domain);
+      line.appendChild(source);
+      var ips = document.createElement("div");
+      ips.className = "result-ips";
+      ips.textContent = (r.ips && r.ips.length) ? r.ips.join("  ") : "不可解析";
+      main.appendChild(line);
+      main.appendChild(ips);
+      item.appendChild(dot);
+      item.appendChild(main);
+      resultList.appendChild(item);
+    });
+  }
+
+  modalClose.onclick = function() { modal.classList.remove("show"); };
+  modal.onclick = function(e) { if (e.target === modal) modal.classList.remove("show"); };
+
+  modalAddAll.onclick = function() {
+    var toAdd = expandResults.filter(function(r){return r.resolved}).map(function(r){return r.domain});
+    if (toAdd.length === 0) return;
+    var cfgText = cfg.value.trim();
+    try {
+      var cfgObj = JSON.parse(cfgText);
+      var existing = new Set((cfgObj.domains || []).map(function(d){return d.name}));
+      var added = 0;
+      toAdd.forEach(function(d) {
+        if (!existing.has(d)) {
+          cfgObj.domains.push({name: d, expand: false});
+          existing.add(d);
+          added++;
+        }
+      });
+      if (added > 0) {
+        cfg.value = JSON.stringify(cfgObj, null, 2);
+        cfgMsg.textContent = "已添加 " + added + " 个域名到配置，点\"保存并生效\"写入";
+        modal.classList.remove("show");
+      } else {
+        alert("所有域名已存在于配置中");
+      }
+    } catch (e) {
+      alert("配置解析失败: " + e);
+    }
+  };
+
+  // 候选 IP 延时与手动切换
+  var ipModal = document.getElementById("ipModal");
+  var ipDomain = document.getElementById("ipDomain");
+  var ipHint = document.getElementById("ipHint");
+  var ipList = document.getElementById("ipList");
+  document.getElementById("ipClose").onclick = function () { ipModal.classList.remove("show"); };
+  ipModal.onclick = function (e) { if (e.target === ipModal) ipModal.classList.remove("show"); };
+
+  function switchIP(domain, ip) {
+    ipHint.textContent = "正在切换到 " + ip + "...";
+    api("/api/switch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ domain: domain, ip: ip })
+    }).then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j.ok) {
+          ipHint.textContent = "切换失败: " + (j.error || "未知错误");
+          return;
+        }
+        ipHint.textContent = "已切换到 " + ip + "，AGH 订阅已同步，即将刷新页面";
+        setTimeout(function () { location.reload(); }, 700);
+      })
+      .catch(function (e) { ipHint.textContent = "请求失败: " + e; });
+  }
+
+  function openCandidates(domain) {
+    ipDomain.textContent = domain;
+    ipHint.textContent = "加载中...";
+    ipList.innerHTML = "";
+    ipModal.classList.add("show");
+    api("/api/candidates?domain=" + encodeURIComponent(domain))
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j.ok) {
+          ipHint.textContent = "加载失败: " + (j.error || "未知错误");
+          return;
+        }
+        var list = j.candidates || [];
+        ipHint.textContent = "共 " + list.length + " 个可连接 IP，当前生效 " + (j.current_ip || "无");
+        if (list.length === 0) {
+          var empty = document.createElement("div");
+          empty.className = "dropdown-empty";
+          empty.textContent = "本轮没有可连接的 IP";
+          ipList.appendChild(empty);
+          return;
+        }
+        list.forEach(function (c) {
+          var item = document.createElement("div");
+          item.className = "result-item result-ok";
+          var dot = document.createElement("span");
+          dot.className = "result-dot";
+          var info = document.createElement("div");
+          info.className = "result-info";
+          var ipEl = document.createElement("div");
+          ipEl.className = "result-domain";
+          ipEl.textContent = c.ip;
+          info.appendChild(ipEl);
+          item.appendChild(dot);
+          item.appendChild(info);
+          var meta = document.createElement("span");
+          meta.className = "result-ips";
+          meta.textContent = (Math.round(c.latency_ms * 10) / 10) + " ms";
+          item.appendChild(meta);
+          if (c.ip === j.current_ip) {
+            var badge = document.createElement("span");
+            badge.className = "badge";
+            badge.textContent = "当前";
+            item.appendChild(badge);
+          } else {
+            var sw = document.createElement("button");
+            sw.type = "button";
+            sw.className = "switch-btn";
+            sw.textContent = "切换";
+            sw.onclick = function () { switchIP(domain, c.ip); };
+            item.appendChild(sw);
+          }
+          ipList.appendChild(item);
+        });
+      })
+      .catch(function (e) { ipHint.textContent = "请求失败: " + e; });
+  }
+  document.querySelectorAll(".latency-btn").forEach(function (el) {
+    el.onclick = function () { openCandidates(el.dataset.domain); };
+  });
+
+  // 单独刷新域名（实际触发一轮全量探测，按钮仅作快捷入口）
+  document.querySelectorAll(".refresh-btn").forEach(function(rowBtn) {
+    rowBtn.onclick = function() {
+      var domain = rowBtn.dataset.domain;
+      rowBtn.disabled = true;
+      rowBtn.textContent = "刷新中...";
+      msg.textContent = "正在刷新 " + domain + "...";
+      startRefresh(msg, function() {
+        rowBtn.disabled = false;
+        rowBtn.textContent = "刷新";
+      }, [domain]);
+    };
+  });
+
+  // 历史趋势：近 N 天平均延迟 + 最近记录
+  var historyDetails = document.getElementById("historyDetails");
+  var historyDomain = document.getElementById("historyDomain");
+  var historyRange = document.getElementById("historyRange");
+  var historyRefresh = document.getElementById("historyRefresh");
+  var historyState = document.getElementById("historyState");
+  var historyRows = document.getElementById("historyRows");
+  var trendChart = document.getElementById("trendChart");
+  var SVGNS = "http://www.w3.org/2000/svg";
+
+  function initHistoryDomains() {
+    var seen = {};
+    var names = [];
+    rows.forEach(function (tr) {
+      var n = tr.dataset.name;
+      if (n && !seen[n]) { seen[n] = true; names.push(n); }
+    });
+    names.sort();
+    var all = document.createElement("option");
+    all.value = "";
+    all.textContent = "全部域名";
+    historyDomain.appendChild(all);
+    names.forEach(function (n) {
+      var opt = document.createElement("option");
+      opt.value = n;
+      opt.textContent = n;
+      historyDomain.appendChild(opt);
+    });
+  }
+
+  function fmtLocal(iso, withDate) {
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return String(iso);
+    function p(n) { return n < 10 ? "0" + n : "" + n; }
+    var time = p(d.getHours()) + ":" + p(d.getMinutes());
+    return withDate ? (d.getMonth() + 1) + "-" + p(d.getDate()) + " " + time : time;
+  }
+
+  function svgEl(tag, attrs) {
+    var el = document.createElementNS(SVGNS, tag);
+    Object.keys(attrs || {}).forEach(function (k) { el.setAttribute(k, attrs[k]); });
+    return el;
+  }
+
+  function renderTrend(records, days) {
+    trendChart.textContent = "";
+    var W = 720, H = 220, L = 46, R = 14, T = 16, B = 28;
+    var now = new Date();
+    var from = new Date(now.getTime() - days * 86400000);
+    var sizeMs = days <= 1 ? 3600000 : (days <= 7 ? 6 * 3600000 : (days <= 30 ? 86400000 : 3 * 86400000));
+    var bucketCount = Math.max(1, Math.ceil((now - from) / sizeMs));
+    var sums = new Array(bucketCount).fill(0);
+    var counts = new Array(bucketCount).fill(0);
+    records.forEach(function (r) {
+      if (!r.validated || !r.latency_ms) return;
+      var t = new Date(r.time).getTime();
+      if (isNaN(t) || t < from.getTime() || t > now.getTime()) return;
+      var idx = Math.floor((t - from.getTime()) / sizeMs);
+      if (idx < 0) idx = 0;
+      if (idx >= bucketCount) idx = bucketCount - 1;
+      sums[idx] += r.latency_ms;
+      counts[idx]++;
+    });
+    var avgs = [];
+    var maxAvg = 0;
+    for (var i = 0; i < bucketCount; i++) {
+      var v = counts[i] ? sums[i] / counts[i] : null;
+      avgs.push(v);
+      if (v !== null && v > maxAvg) maxAvg = v;
+    }
+    var maxY = Math.max(10, Math.ceil(maxAvg * 1.2 / 10) * 10);
+
+    var plotW = W - L - R, plotH = H - T - B;
+    function x(i) { return L + (bucketCount === 1 ? plotW / 2 : (i / (bucketCount - 1)) * plotW); }
+    function y(v) { return T + plotH - (v / maxY) * plotH; }
+
+    for (var g = 0; g <= 3; g++) {
+      var gv = maxY * g / 3;
+      var gy = y(gv);
+      trendChart.appendChild(svgEl("line", { x1: L, y1: gy, x2: W - R, y2: gy, class: "trend-grid" }));
+      var label = svgEl("text", { x: L - 8, y: gy + 4, class: "trend-label", "text-anchor": "end" });
+      label.textContent = Math.round(gv) + "ms";
+      trendChart.appendChild(label);
+    }
+
+    var d = "", started = false;
+    for (var j = 0; j < bucketCount; j++) {
+      if (avgs[j] === null) { started = false; continue; }
+      d += (started ? " L" : " M") + x(j).toFixed(1) + " " + y(avgs[j]).toFixed(1);
+      started = true;
+      trendChart.appendChild(svgEl("circle", { cx: x(j), cy: y(avgs[j]), r: 3, class: "trend-dot" }));
+    }
+    if (d) {
+      trendChart.appendChild(svgEl("path", { d: d, class: "trend-line" }));
+    } else {
+      var empty = svgEl("text", { x: W / 2, y: H / 2, class: "trend-label", "text-anchor": "middle" });
+      empty.textContent = "暂无历史数据";
+      trendChart.appendChild(empty);
+    }
+
+    var ticks = 4;
+    for (var k = 0; k < ticks; k++) {
+      var ts = from.getTime() + (now.getTime() - from.getTime()) * (k / (ticks - 1));
+      var td = new Date(ts);
+      var lbl = svgEl("text", {
+        x: L + (k / (ticks - 1)) * plotW, y: H - 8, class: "trend-label",
+        "text-anchor": k === 0 ? "start" : (k === ticks - 1 ? "end" : "middle")
+      });
+      lbl.textContent = days <= 1 ? fmtLocal(td.toISOString(), false) : (td.getMonth() + 1) + "-" + td.getDate();
+      trendChart.appendChild(lbl);
+    }
+  }
+
+  function renderHistoryRows(records) {
+    var list = records.slice(-100).reverse();
+    historyRows.textContent = "";
+    if (list.length === 0) {
+      var tr = document.createElement("tr");
+      var td = document.createElement("td");
+      td.colSpan = 5;
+      td.className = "history-empty";
+      td.textContent = "暂无历史记录";
+      tr.appendChild(td);
+      historyRows.appendChild(tr);
+      return;
+    }
+    list.forEach(function (r) {
+      var tr = document.createElement("tr");
+      var cells = [
+        fmtLocal(r.time, true),
+        r.domain,
+        r.ip || "—",
+        r.latency_ms ? Math.round(r.latency_ms * 10) / 10 + " ms" : "—"
+      ];
+      cells.forEach(function (text) {
+        var td = document.createElement("td");
+        td.textContent = text;
+        tr.appendChild(td);
+      });
+      var st = document.createElement("td");
+      var dot = document.createElement("span");
+      dot.className = "status-dot " + (r.validated ? "status-ok" : "status-fail");
+      st.appendChild(dot);
+      st.appendChild(document.createTextNode(r.validated ? "正常" : "失败"));
+      tr.appendChild(st);
+      historyRows.appendChild(tr);
+    });
+  }
+
+  function fetchHistory() {
+    var days = parseInt(historyRange.value, 10) || 7;
+    var now = new Date();
+    var from = new Date(now.getTime() - days * 86400000);
+    var url = "/api/history?from=" + encodeURIComponent(from.toISOString()) +
+      "&to=" + encodeURIComponent(now.toISOString()) + "&limit=5000";
+    if (historyDomain.value) url += "&domain=" + encodeURIComponent(historyDomain.value);
+    historyState.textContent = "加载中...";
+    api(url)
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j.ok) {
+          historyState.textContent = "加载失败: " + (j.error || "未知错误");
+          return;
+        }
+        var records = j.records || [];
+        renderTrend(records, days);
+        renderHistoryRows(records);
+        historyState.textContent = records.length ? ("共 " + records.length + " 条记录") : "该时间范围内暂无记录";
+      })
+      .catch(function (e) { historyState.textContent = "加载失败: " + e; });
+  }
+
+  initHistoryDomains();
+  historyRefresh.onclick = fetchHistory;
+  historyRange.onchange = fetchHistory;
+  historyDomain.onchange = fetchHistory;
+  historyDetails.addEventListener("toggle", function () {
+    if (historyDetails.open) fetchHistory();
+  });
+
+  // 运行日志：增量拉取 + 关键字筛选
+  var logView = document.getElementById("logView");
+  var logAuto = document.getElementById("logAuto");
+  var logFilter = document.getElementById("logFilter");
+  var logClear = document.getElementById("logClear");
+  var logState = document.getElementById("logState");
+  var logDetails = document.getElementById("logDetails");
+  var logEntries = [];
+  var logSeq = 0;
+
+  function renderLogs() {
+    var kw = logFilter.value.trim().toLowerCase();
+    var rows = logEntries.filter(function (e) {
+      return !kw || String(e.text || "").toLowerCase().indexOf(kw) >= 0;
+    });
+    var atBottom = logView.scrollTop + logView.clientHeight >= logView.scrollHeight - 24;
+    logView.textContent = "";
+    rows.forEach(function (e) {
+      var line = document.createElement("span");
+      line.className = "log-line";
+      line.appendChild(document.createTextNode(e.text || ""));
+      logView.appendChild(line);
+    });
+    if (atBottom) logView.scrollTop = logView.scrollHeight;
+    logState.textContent = rows.length + " 条" + (kw ? "（已筛选）" : "") + " · 最新序号 " + logSeq;
+  }
+  function fetchLogs() {
+    api("/api/logs?after=" + logSeq + "&limit=500")
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j.ok) return;
+        if (j.entries && j.entries.length) {
+          logEntries = logEntries.concat(j.entries);
+          if (logEntries.length > 2000) logEntries = logEntries.slice(logEntries.length - 2000);
+        }
+        logSeq = j.last_seq || logSeq;
+        renderLogs();
+      })
+      .catch(function () {});
+  }
+  logFilter.addEventListener("input", renderLogs);
+  logClear.onclick = function () { logEntries = []; renderLogs(); };
+  logAuto.onchange = function () { if (logAuto.checked) fetchLogs(); };
+  logDetails.addEventListener("toggle", function () { if (logDetails.open) fetchLogs(); });
+  fetchLogs();
+  setInterval(function () {
+    if (logAuto.checked && logDetails.open) fetchLogs();
+  }, 2500);
+})();
+</script>
+</body></html>

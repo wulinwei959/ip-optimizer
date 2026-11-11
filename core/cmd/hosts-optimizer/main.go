@@ -18,7 +18,9 @@ import (
 	"hosts-optimizer/internal/logbuf"
 )
 
-const version = "1.1.0"
+// version 由构建脚本通过 -ldflags "-X main.version=..." 注入（值取自 manifest 的 version），
+// 保证 -version、/healthz 与界面显示的版本和 FPK 版本一致；未注入时为开发态占位值。
+var version = "dev"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)

@@ -62,7 +62,7 @@ echo "[1/5] 交叉编译 GOOS=linux GOARCH=$GOARCH（GOPROXY=off，强制零依�
 (
   cd "$CORE_DIR"
   CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" GOPROXY=off GOSUMDB=off \
-    go build -trimpath -ldflags="-s -w" -o "$STG/app/bin/hosts-optimizer" "$GO_PACKAGE"
+    go build -trimpath -ldflags="-s -w -X main.version=$VERSION" -o "$STG/app/bin/hosts-optimizer" "$GO_PACKAGE"
 )
 chmod +x "$STG/app/bin/hosts-optimizer"
 

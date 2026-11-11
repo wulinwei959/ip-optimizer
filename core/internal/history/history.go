@@ -1,8 +1,11 @@
-// Package history 用标准库实现按时间分片的追加式历史存储。
+// Package history 用标准库实现按轮次分片的追加式历史存储。
 //
-// 每轮探测的每个域名写一行 JSON，按月写入 rounds-YYYYMM.jsonl.gz；
-// 每个压缩成员独立，追加时不会重写旧数据。查询按时间范围流式读取，
-// 保留期外的分片会自动清理。对外暴露 Store 接口，便于将来替换为 SQLite。
+// 每轮探测的每个域名写一行 JSON，一个轮次一个 gzip JSONL 分片
+// （rounds-YYYYMMDD-HHMMSS-NNNN.jsonl.gz）。追加时只写新文件，不重写旧数据，
+// 因此不会像「每月一个分片」那样每轮都把整个月文件重新压缩一遍。
+//
+// 查询从最新分片往前读，取满 limit 条即可停止，不会把整段历史读进内存；
+// 保留期外的分片自动清理。对外暴露 Store 接口，便于将来替换为 SQLite。
 package history
 
 import (
@@ -49,11 +52,13 @@ type Store interface {
 	Close() error
 }
 
-// FileStore 是基于 gzip JSONL 分片文件的实现。
+// FileStore 是基于「每轮一个 gzip JSONL 分片」的追加式实现。
 type FileStore struct {
 	dir       string
 	retention int
 	mu        sync.RWMutex
+	curDay    string
+	curSeq    int
 }
 
 // Open 创建历史目录并按保留期清理旧分片。
@@ -74,7 +79,7 @@ func Open(dir string, retentionMonths int) (*FileStore, error) {
 
 func (s *FileStore) Close() error { return nil }
 
-// Append 追加一批记录；同一批必须属于同一个月（调用方按轮次写入，天然满足）。
+// Append 把一批记录写成一个分片；同一批必须属于同一个轮次（调用方按轮次写入，天然满足）。
 func (s *FileStore) Append(records []Record) error {
 	if len(records) == 0 {
 		return nil
@@ -82,8 +87,15 @@ func (s *FileStore) Append(records []Record) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	month := records[0].Time.Format("200601")
-	path := filepath.Join(s.dir, "rounds-"+month+".jsonl.gz")
+	at := records[0].Time
+	if day := at.Format("20060102"); day != s.curDay {
+		s.curDay = day
+		s.curSeq = 0
+	}
+	name := fmt.Sprintf("rounds-%s-%04d.jsonl.gz", at.Format("20060102-150405"), s.curSeq)
+	s.curSeq++
+	path := filepath.Join(s.dir, name)
+
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return fmt.Errorf("打开历史分片失败: %w", err)
@@ -112,7 +124,7 @@ func (s *FileStore) Append(records []Record) error {
 	return nil
 }
 
-// Query 返回时间范围内的记录（按时间升序）。Limit>0 时保留最近的 N 条。
+// Query 返回时间范围内的记录（按时间升序）。Limit>0 时只保留最近的 N 条。
 func (s *FileStore) Query(filter Filter) ([]Record, error) {
 	to := filter.To
 	if to.IsZero() {
@@ -129,22 +141,71 @@ func (s *FileStore) Query(filter Filter) ([]Record, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var out []Record
-	for month := monthStart(from); !month.After(monthStart(to)); month = month.AddDate(0, 1, 0) {
-		path := filepath.Join(s.dir, "rounds-"+month.Format("200601")+".jsonl.gz")
-		records, err := readFile(path, from, to, filter)
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, err
+	}
+	type shard struct {
+		name string
+		key  time.Time
+	}
+	shards := make([]shard, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasPrefix(name, "rounds-") || !strings.HasSuffix(name, ".jsonl.gz") {
+			continue
+		}
+		key, ok := shardKey(name)
+		if !ok {
+			continue
+		}
+		shards = append(shards, shard{name: name, key: key})
+	}
+	// 新→旧：时间键相同的（同一天）按文件名倒序，文件名里含时分秒与序号，
+	// 倒序正好是时间倒序。
+	sort.Slice(shards, func(i, j int) bool {
+		if !shards[i].key.Equal(shards[j].key) {
+			return shards[i].key.After(shards[j].key)
+		}
+		return shards[i].name > shards[j].name
+	})
+
+	out := make([]Record, 0, 256)
+	legacy := false
+	for _, sh := range shards {
+		// 旧月度分片的时间键是月初，可能明显早于它里面的记录，不能据此提前结束。
+		if !isLegacyShard(sh.name) && sh.key.Before(from) {
+			break
+		}
+		records, err := readFile(filepath.Join(s.dir, sh.name), from, to, filter)
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue
 			}
-			// 损坏或截断的分片只丢弃尾部，不影响其余月份。
+			// 损坏或截断的分片只丢弃它自己，不影响其余分片。
 			if len(records) == 0 {
 				continue
 			}
 		}
-		out = append(out, records...)
+		if isLegacyShard(sh.name) {
+			legacy = true
+		}
+		for i := len(records) - 1; i >= 0; i-- {
+			out = append(out, records[i])
+		}
+		// 已经拿到最近 N 条，且后续分片不可能更晚，可以提前结束。
+		if filter.Limit > 0 && len(out) >= filter.Limit && !legacy {
+			break
+		}
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
+
+	// 倒序收集，反转成时间升序。
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
 	if filter.Limit > 0 && len(out) > filter.Limit {
 		out = out[len(out)-filter.Limit:]
 	}
@@ -155,6 +216,27 @@ func monthStart(t time.Time) time.Time {
 	return time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, t.Location())
 }
 
+// shardKey 从分片文件名解析时间键：新格式取轮次时间（与记录时间一致），旧月度格式取月初。
+func shardKey(name string) (time.Time, bool) {
+	body := strings.TrimSuffix(strings.TrimPrefix(name, "rounds-"), ".jsonl.gz")
+	if len(body) >= 15 {
+		if t, err := time.ParseInLocation("20060102-150405", body[:15], time.Local); err == nil {
+			return t, true
+		}
+		return time.Time{}, false
+	}
+	if t, err := time.ParseInLocation("200601", body, time.Local); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
+}
+
+// isLegacyShard 判断是否为旧版「每月一个分片」的命名（rounds-YYYYMM.jsonl.gz）。
+func isLegacyShard(name string) bool {
+	body := strings.TrimSuffix(strings.TrimPrefix(name, "rounds-"), ".jsonl.gz")
+	return !strings.Contains(body, "-")
+}
+
 func (s *FileStore) cleanupLocked(now time.Time) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
@@ -162,16 +244,18 @@ func (s *FileStore) cleanupLocked(now time.Time) {
 	}
 	cutoff := monthStart(now).AddDate(0, -(s.retention - 1), 0)
 	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
 		name := e.Name()
-		if e.IsDir() || !strings.HasPrefix(name, "rounds-") || !strings.HasSuffix(name, ".jsonl.gz") {
+		if !strings.HasPrefix(name, "rounds-") || !strings.HasSuffix(name, ".jsonl.gz") {
 			continue
 		}
-		key := strings.TrimSuffix(strings.TrimPrefix(name, "rounds-"), ".jsonl.gz")
-		t, err := time.ParseInLocation("200601", key, now.Location())
-		if err != nil {
+		key, ok := shardKey(name)
+		if !ok {
 			continue
 		}
-		if t.Before(cutoff) {
+		if key.Before(cutoff) {
 			_ = os.Remove(filepath.Join(s.dir, name))
 		}
 	}

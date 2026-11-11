@@ -160,6 +160,7 @@ func splitHostPortDefault(hostport, defPort string) (string, string, error) {
 //
 //	223.5.5.5                      -> UDP 53
 //	223.5.5.5:5353 / udp://...     -> UDP 指定端口
+//	tcp://223.5.5.5[:5353]         -> DNS over TCP（UDP 被重置/截断时的兜底）
 //	tls://dns.alidns.com[:853]     -> DoT
 //	https://dns.alidns.com/dns-query -> DoH
 func parseServer(raw string) (upstream, error) {
@@ -196,6 +197,15 @@ func parseServer(raw string) (upstream, error) {
 			return upstream{}, fmt.Errorf("UDP DNS 必须是字面 IP: %q", h)
 		}
 		return upstream{kind: "udp", addr: net.JoinHostPort(h, p), host: h}, nil
+	case "tcp":
+		h, p, err := splitHostPortDefault(u.Host, "53")
+		if err != nil {
+			return upstream{}, err
+		}
+		if net.ParseIP(h) == nil {
+			return upstream{}, fmt.Errorf("TCP DNS 必须是字面 IP: %q", h)
+		}
+		return upstream{kind: "tcp", addr: net.JoinHostPort(h, p), host: h}, nil
 	case "tls", "dot":
 		h, p, err := splitHostPortDefault(u.Host, "853")
 		if err != nil {
@@ -249,7 +259,48 @@ func queryUDP(ctx context.Context, up upstream, name string, timeout time.Durati
 	if err != nil {
 		return nil, err
 	}
+	// TC=1 表示应答被截断（EDNS 大报文或运营商拦截都可能造成），交给上层回退 TCP。
+	if len(buf[:n]) >= 4 && buf[2]&0x02 != 0 {
+		return nil, errors.New("DNS 应答被截断（TC=1）")
+	}
 	return parseAResponse(buf[:n], id)
+}
+
+// queryTCP 走 DNS over TCP（RFC 1035 的 2 字节长度前缀）。
+// 既支持显式 tcp:// 上游，也作为 udp:// 上游被重置/截断时的兜底。
+func queryTCP(ctx context.Context, up upstream, name string, timeout time.Duration) ([]net.IP, error) {
+	id, q, err := newQuery(name)
+	if err != nil {
+		return nil, err
+	}
+	d := net.Dialer{Timeout: timeout}
+	conn, err := d.DialContext(ctx, "tcp", up.addr)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+
+	frame := make([]byte, 2+len(q))
+	binary.BigEndian.PutUint16(frame[:2], uint16(len(q)))
+	copy(frame[2:], q)
+	if _, err := conn.Write(frame); err != nil {
+		return nil, err
+	}
+
+	var lenBuf [2]byte
+	if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
+		return nil, err
+	}
+	n := int(binary.BigEndian.Uint16(lenBuf[:]))
+	if n < 12 {
+		return nil, errors.New("DNS over TCP 响应长度非法")
+	}
+	resp := make([]byte, n)
+	if _, err := io.ReadFull(conn, resp); err != nil {
+		return nil, err
+	}
+	return parseAResponse(resp, id)
 }
 
 func queryDoT(ctx context.Context, up upstream, name string, timeout time.Duration, roots *x509.CertPool) ([]net.IP, error) {
@@ -294,21 +345,46 @@ func queryDoT(ctx context.Context, up upstream, name string, timeout time.Durati
 	return parseAResponse(resp, id)
 }
 
+// sharedTransport 是所有 DoH 查询共用的传输层：每次查询新建 Transport 意味着每次都要
+// 重新做一次 TCP + TLS 握手，连接无法复用，高并发下握手开销占比很高。
+var sharedTransport = &http.Transport{
+	Proxy:                 nil,
+	ForceAttemptHTTP2:     true,
+	MaxIdleConns:          64,
+	MaxIdleConnsPerHost:   8,
+	IdleConnTimeout:       90 * time.Second,
+	TLSHandshakeTimeout:   5 * time.Second,
+	ResponseHeaderTimeout: 5 * time.Second,
+	DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+}
+
+var transportMu sync.Mutex
+var dohCache = map[*x509.CertPool]*http.Transport{}
+
+// dohTransport 返回绑定到指定证书池的共享 Transport。
+// 证书池由 HO_CA_BUNDLE 决定，不能直接写在共享 Transport 上，因此按池缓存：
+// 同一个池复用同一份连接池，不同池互不串用。
+func dohTransport(roots *x509.CertPool) *http.Transport {
+	if roots == nil {
+		return sharedTransport
+	}
+	transportMu.Lock()
+	defer transportMu.Unlock()
+	if t, ok := dohCache[roots]; ok {
+		return t
+	}
+	t := sharedTransport.Clone()
+	t.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+	dohCache[roots] = t
+	return t
+}
+
 func queryDoH(ctx context.Context, up upstream, name string, timeout time.Duration, roots *x509.CertPool) ([]net.IP, error) {
 	id, q, err := newQuery(name)
 	if err != nil {
 		return nil, err
 	}
-	transport := &http.Transport{
-		Proxy:                 nil,
-		TLSClientConfig:       &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
-		ForceAttemptHTTP2:     true,
-		DialContext:           (&net.Dialer{Timeout: timeout}).DialContext,
-		TLSHandshakeTimeout:   timeout,
-		ResponseHeaderTimeout: timeout,
-		IdleConnTimeout:       timeout,
-	}
-	client := &http.Client{Transport: transport, Timeout: timeout}
+	client := &http.Client{Transport: dohTransport(roots), Timeout: timeout}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, up.url, bytes.NewReader(q))
 	if err != nil {
 		return nil, err
@@ -340,8 +416,22 @@ func queryOne(ctx context.Context, raw, name string, timeout time.Duration, root
 		return queryDoT(ctx, up, name, timeout, roots)
 	case "doh":
 		return queryDoH(ctx, up, name, timeout, roots)
+	case "tcp":
+		return queryTCP(ctx, up, name, timeout)
 	default:
-		return queryUDP(ctx, up, name, timeout)
+		ips, err := queryUDP(ctx, up, name, timeout)
+		if err == nil {
+			return ips, nil
+		}
+		// 家宽上 UDP 53 被运营商干预（丢包/重置/截断）很常见：回退 TCP 再试一次。
+		// 这里必须换一个新的上下文：UDP 那次读已经把 ctx 的超时耗掉了，
+		// 直接复用会让 TCP 一开头就 deadline exceeded。
+		fallbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+		defer cancel()
+		if tcpIPs, tcpErr := queryTCP(fallbackCtx, up, name, timeout); tcpErr == nil {
+			return tcpIPs, nil
+		}
+		return nil, err
 	}
 }
 
@@ -383,40 +473,47 @@ func Collect(ctx context.Context, name string, servers []string, timeout time.Du
 	})
 }
 
-// CollectWithOptions 并发查询所有上游（UDP/DoT/DoH），返回去重后的候选 IPv4 列表
-// （按地址排序，保证顺序稳定）。allowPrivate=false 时过滤 RFC1918；
-// Limit 限制单域名候选数，避免扫描量失控。
+// CollectWithOptions 并发查询所有上游（UDP/DoT/DoH），返回去重后的候选 IPv4 列表。
+// allowPrivate=false 时过滤 RFC1918；Limit 限制单域名候选数，避免扫描量失控。
+//
+// 截断按「来源轮转」而非「全量排序后切前 N」：每个上游先各取一个再回到第一个取第二个，
+// 保证被截掉的候选仍覆盖多个上游/网段。直接按地址字符串排序后截断，会把编号较大的
+// 地址整段丢掉，候选面反而更窄。
 func CollectWithOptions(ctx context.Context, name string, servers []string, opts Options) ([]string, error) {
 	timeout := opts.Timeout
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
 	type answer struct {
-		ips []net.IP
-		err error
+		source int
+		ips    []net.IP
+		err    error
 	}
 	ch := make(chan answer, len(servers))
 	var wg sync.WaitGroup
-	for _, s := range servers {
+	for i, s := range servers {
 		wg.Add(1)
-		go func(server string) {
+		go func(source int, server string) {
 			defer wg.Done()
 			sub, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
 			ips, err := queryOne(sub, server, name, timeout, opts.RootCAs)
-			ch <- answer{ips: ips, err: err}
-		}(s)
+			ch <- answer{source: source, ips: ips, err: err}
+		}(i, s)
 	}
 	wg.Wait()
 	close(ch)
 
 	seen := make(map[string]bool)
-	var out []string
+	perSource := make([][]string, len(servers))
 	var lastErr error
 	var anySuccess bool
 	for a := range ch {
 		if a.err != nil {
 			lastErr = a.err
+			continue
+		}
+		if a.source >= len(perSource) {
 			continue
 		}
 		anySuccess = true
@@ -425,10 +522,11 @@ func CollectWithOptions(ctx context.Context, name string, servers []string, opts
 				continue
 			}
 			key := ip.String()
-			if !seen[key] {
-				seen[key] = true
-				out = append(out, key)
+			if seen[key] {
+				continue
 			}
+			seen[key] = true
+			perSource[a.source] = append(perSource[a.source], key)
 		}
 	}
 	if !anySuccess {
@@ -437,9 +535,39 @@ func CollectWithOptions(ctx context.Context, name string, servers []string, opts
 		}
 		return nil, lastErr
 	}
-	sort.Strings(out)
-	if opts.Limit > 0 && len(out) > opts.Limit {
-		out = out[:opts.Limit]
+	for i := range perSource {
+		sort.Strings(perSource[i])
 	}
-	return out, nil
+	return pickDiverse(perSource, opts.Limit), nil
+}
+
+// pickDiverse 从各来源轮流取候选，直到达到 limit；limit<=0 表示不截断。
+func pickDiverse(perSource [][]string, limit int) []string {
+	if limit <= 0 {
+		var out []string
+		for _, src := range perSource {
+			out = append(out, src...)
+		}
+		return out
+	}
+	out := make([]string, 0, limit)
+	cursor := make([]int, len(perSource))
+	for len(out) < limit {
+		picked := false
+		for i := range perSource {
+			if cursor[i] >= len(perSource[i]) {
+				continue
+			}
+			out = append(out, perSource[i][cursor[i]])
+			cursor[i]++
+			picked = true
+			if len(out) >= limit {
+				return out
+			}
+		}
+		if !picked {
+			break
+		}
+	}
+	return out
 }

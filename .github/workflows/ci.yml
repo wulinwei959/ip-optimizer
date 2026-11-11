@@ -45,7 +45,10 @@ jobs:
       - name: Run tests
         run: |
           cd core
-          GOPROXY=off GOSUMDB=off CGO_ENABLED=0 go test ./... -v
+          # -race 必须开：本项目的轮次、状态落盘与 DNS 应答器都是多 goroutine 并发路径，
+          # 锁错配、原子快照撕裂这类缺陷只有竞态检测能抓到（本项目就踩过 SaveAsync 的锁不匹配）。
+          # CGO_ENABLED=1 是 -race 的前提，覆盖全局的 0。
+          GOPROXY=off GOSUMDB=off CGO_ENABLED=1 go test -race ./... -v
 
   build-cross:
     name: Cross-compile (amd64, arm64)
@@ -72,14 +75,27 @@ jobs:
       - name: Build static binary
         run: |
           cd core
+          VERSION="$(sed -n 's/^version=//p' ../deploy/fnos-native-fpk/manifest | head -1 | tr -d '[:space:]')"
+          [ -n "$VERSION" ] || { echo "manifest 缺少 version" >&2; exit 1; }
           GOOS=linux GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 GOPROXY=off GOSUMDB=off \
-            go build -trimpath -ldflags="-s -w" -o hosts-optimizer-${{ matrix.platform }} ./cmd/hosts-optimizer
+            go build -trimpath -ldflags="-s -w -X main.version=$VERSION" -o hosts-optimizer-${{ matrix.platform }} ./cmd/hosts-optimizer
           file hosts-optimizer-${{ matrix.platform }}
 
       - name: Verify static binary
         working-directory: core
         run: |
           file hosts-optimizer-${{ matrix.platform }} | grep -q "statically linked"
+
+      - name: Verify version matches manifest
+        # arm64 二进制无法在 x86 runner 上执行，版本运行校验只对 amd64 做；
+        # 两架构共用同一份 ldflags 注入逻辑，amd64 通过即可代表注入正确。
+        if: matrix.goarch == 'amd64'
+        working-directory: core
+        run: |
+          VERSION="$(sed -n 's/^version=//p' ../deploy/fnos-native-fpk/manifest | head -1 | tr -d '[:space:]')"
+          got="$(./hosts-optimizer-${{ matrix.platform }} -version | awk '{print $2}')"
+          echo "manifest version=$VERSION, binary version=$got"
+          [ "$got" = "$VERSION" ] || { echo "二进制版本与 manifest 不一致" >&2; exit 1; }
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4

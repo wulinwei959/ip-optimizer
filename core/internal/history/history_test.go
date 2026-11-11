@@ -1,8 +1,11 @@
 package history
 
 import (
+	"compress/gzip"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -70,22 +73,65 @@ func TestQueryFiltersAndLimit(t *testing.T) {
 	}
 }
 
-func TestMonthlyRotation(t *testing.T) {
+// 一个轮次一个分片：跨月写入后应得到两个分片，且跨月查询都能读到。
+func TestShardPerRoundCrossMonth(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(dir, 12)
 	oct := testTime(2026, 10, 31, 23)
 	nov := testTime(2026, 11, 1, 0)
-	_ = s.Append([]Record{{Time: oct, Domain: "a.com", Group: "a.com"}})
-	_ = s.Append([]Record{{Time: nov, Domain: "b.com", Group: "b.com"}})
+	if err := s.Append([]Record{{Time: oct, Domain: "a.com", Group: "a.com"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append([]Record{{Time: nov, Domain: "b.com", Group: "b.com"}}); err != nil {
+		t.Fatal(err)
+	}
 
-	for _, name := range []string{"rounds-202610.jsonl.gz", "rounds-202611.jsonl.gz"} {
-		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
-			t.Fatalf("缺少分片 %s: %v", name, err)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shards := 0
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasPrefix(e.Name(), "rounds-") && strings.HasSuffix(e.Name(), ".jsonl.gz") {
+			shards++
 		}
 	}
+	if shards != 2 {
+		t.Fatalf("每个轮次一个分片，实际 %d 个", shards)
+	}
+
 	got, _ := s.Query(Filter{From: oct.Add(-time.Hour), To: nov.Add(time.Hour)})
 	if len(got) != 2 {
 		t.Fatalf("跨月查询 = %d, want 2", len(got))
+	}
+	if !got[0].Time.Equal(oct) || !got[1].Time.Equal(nov) {
+		t.Fatalf("跨月查询顺序不符: %+v", got)
+	}
+}
+
+// 多轮次写入后，limit 只保留最近 N 条，且整体按时间升序。
+func TestMultipleRoundsKeepsRecentAndOrders(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir, 12)
+	base := testTime(2026, 11, 7, 10)
+	for i := 0; i < 5; i++ {
+		rec := []Record{{
+			Time: base.Add(time.Duration(i) * time.Hour), RoundID: "r",
+			Domain: "github.com", Group: "github.com", Validated: true,
+		}}
+		if err := s.Append(rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.Query(Filter{Domain: "github.com", From: base.Add(-time.Hour), To: base.Add(6 * time.Hour), Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("limit 结果 = %d, want 2", len(got))
+	}
+	if !got[0].Time.Equal(base.Add(3*time.Hour)) || !got[1].Time.Equal(base.Add(4*time.Hour)) {
+		t.Fatalf("应保留最近两条且升序: %+v", got)
 	}
 }
 
@@ -103,8 +149,50 @@ func TestRetentionCleanup(t *testing.T) {
 	if err := s.Append([]Record{{Time: recent, Domain: "new.com", Group: "new.com"}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "rounds-202501.jsonl.gz")); !os.IsNotExist(err) {
-		t.Fatalf("过期分片应被清理，err=%v", err)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if strings.HasPrefix(e.Name(), "rounds-202501") {
+			t.Fatalf("过期分片应被清理: %s", e.Name())
+		}
+	}
+}
+
+// 旧版「每月一个分片」的历史仍应可读：升级后趋势图不会突然全空。
+func TestLegacyMonthlyShardStillReadable(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir, 12)
+	legacy := testTime(2026, 11, 7, 10)
+
+	f, err := os.Create(filepath.Join(dir, "rounds-202611.jsonl.gz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := gzip.NewWriter(f)
+	if err := json.NewEncoder(zw).Encode(Record{
+		Time: legacy, RoundID: "old", Domain: "old.com", Group: "old.com",
+		IP: "1.1.1.1", Validated: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Query(Filter{Domain: "old.com", From: legacy.Add(-time.Hour), To: legacy.Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Domain != "old.com" {
+		t.Fatalf("旧月度分片应可读，得到 %+v", got)
 	}
 }
 

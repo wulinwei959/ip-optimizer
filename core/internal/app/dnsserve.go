@@ -15,6 +15,13 @@ import (
 	"hosts-optimizer/internal/output"
 )
 
+const (
+	// 单行分流行最多放多少个域名 / 多少字节，超出就换行。
+	// AGH 的上游服务器列表是逐行解析的，拆多行不影响语义。
+	maxDomainsPerLine = 40
+	maxAghLineBytes   = 2000
+)
+
 // initDNSServer 根据配置初始化内置 DNS 应答器。
 // 必须在 recoverSnapshot 之前调用：恢复流程会刷新应答视图，依赖 dnsSrv 已就绪。
 // 同时在这里设定 TTL 初值，避免首轮探测前恢复出的视图带 TTL=0。
@@ -214,12 +221,20 @@ func (a *App) refreshDNSFamiliesFromConfig() {
 	a.updateDNSFamilies(rt.Config.Domains)
 }
 
-// aghUpstreamLine 生成可直接粘贴到 AGH「上游 DNS 服务器」的分流行。
+// aghUpstreamLine 生成可直接粘贴到 AGH「上游 DNS 服务器」的分流行（多行时用换行连接）。
 func (a *App) aghUpstreamLine() string {
+	return strings.Join(a.aghUpstreamLines(), "\n")
+}
+
+// aghUpstreamLines 生成分流行列表。
+//
+// AGH 的上游服务器列表本身是逐行解析的，而域名多时单行会非常长（超出配置框/校验限制），
+// 因此按「每行域名个数 + 单行字节数」两个上限拆成多行，语义完全不变。
+func (a *App) aghUpstreamLines() []string {
 	families := a.dnsFamiliesSnapshot()
 	srv, listen := a.dnsServerSnapshot()
 	if srv == nil || listen == "" || len(families) == 0 {
-		return ""
+		return nil
 	}
 	// 以「实际绑定的地址」为准，保证分流行与监听地址永远同步。
 	if addr := srv.Addr(); addr != "" {
@@ -228,13 +243,34 @@ func (a *App) aghUpstreamLine() string {
 	// AGH 语法：[/域名/域名/]主机:端口
 	host, port, err := net.SplitHostPort(listen)
 	if err != nil {
-		return ""
+		return nil
 	}
 	// 监听通配地址时，分流行必须换成容器可达的内网 IP，否则 AGH 拿到的是 0.0.0.0。
 	if host == "" || isWildcardHost(host) {
 		host = outboundHost()
 	}
-	return "[/" + strings.Join(families, "/") + "/]" + host + ":" + port
+	suffix := "/]" + host + ":" + port
+
+	lines := make([]string, 0, len(families)/maxDomainsPerLine+1)
+	cur := ""
+	count := 0
+	for _, fam := range families {
+		seg := fam
+		if count > 0 {
+			seg = "/" + seg
+		}
+		if count > 0 && (count >= maxDomainsPerLine || len(cur)+len(seg)+len(suffix) > maxAghLineBytes) {
+			lines = append(lines, "[/"+cur+suffix)
+			cur, count = "", 0
+			seg = fam
+		}
+		cur += seg
+		count++
+	}
+	if count > 0 {
+		lines = append(lines, "[/"+cur+suffix)
+	}
+	return lines
 }
 
 // isWildcardHost 判断是否为 0.0.0.0 / :: 这类通配监听地址。

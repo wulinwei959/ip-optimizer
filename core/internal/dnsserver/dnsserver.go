@@ -41,6 +41,11 @@ const (
 	maxLabelBytes  = 63   // 单个 label 上限
 	maxNameLabels  = 127  // label 数量上限，配合总长防环形压缩
 	headerSize     = 12   // DNS 报文头长度
+
+	// maxConcurrentPackets 是同时在途的应答处理上限。
+	// 超过上限就在读循环里直接处理（背压），而不是继续开 goroutine：
+	// 内网里有人拿这个端口做压力测试时，不会把进程撑爆。
+	maxConcurrentPackets = 256
 )
 
 // Record 是一条应答记录。Name 必须为规范化小写且无尾点；
@@ -241,6 +246,9 @@ func (s *Server) Serve(ctx context.Context) error {
 		}
 	}()
 
+	// 并发上限：应答器被内网打满时不至于无限起 goroutine。
+	// 超过上限就在读循环里直接处理（背压），而不是继续开 goroutine。
+	sem := make(chan struct{}, maxConcurrentPackets)
 	buf := make([]byte, maxUDPSize)
 	for {
 		n, remote, err := conn.ReadFromUDP(buf)
@@ -257,14 +265,19 @@ func (s *Server) Serve(ctx context.Context) error {
 			s.malformed.Add(1)
 			continue
 		}
-		// 每包一个 goroutine：家宽量级绰绰有余。
 		// recover 兜底：应答器 panic 绝不能拖死整个服务。
 		packet := make([]byte, n)
 		copy(packet, buf[:n])
-		go func(remote *net.UDPAddr, packet []byte) {
-			defer func() { _ = recover() }()
+		select {
+		case sem <- struct{}{}:
+			go func(remote *net.UDPAddr, packet []byte) {
+				defer func() { <-sem }()
+				defer func() { _ = recover() }()
+				s.handlePacket(conn, remote, packet)
+			}(remote, packet)
+		default:
 			s.handlePacket(conn, remote, packet)
-		}(remote, packet)
+		}
 	}
 }
 
@@ -305,10 +318,10 @@ func (s *Server) handlePacket(conn *net.UDPConn, remote *net.UDPAddr, packet []b
 		return
 	}
 
-	s.countMiss(q.name)
-
 	v := s.view.Load()
 	rec, hit := v.Lookup(q.name)
+	s.countMiss(q.name, hit)
+
 	switch q.qtype {
 	case typeA:
 		if hit && rec.IP != "" {
@@ -344,11 +357,10 @@ func (s *Server) handlePacket(conn *net.UDPConn, remote *net.UDPAddr, packet []b
 }
 
 // countMiss 对清单外域名做限频日志：时间窗限频（默认 10 秒内最多 1 条）。
-func (s *Server) countMiss(name string) {
-	if v := s.view.Load(); v != nil {
-		if _, hit := v.Lookup(name); hit {
-			return
-		}
+// hit 由调用方查视图时一并给出，避免为了记一次日志再查一遍。
+func (s *Server) countMiss(name string, hit bool) {
+	if hit {
+		return
 	}
 	s.missCount.Add(1)
 	now := time.Now().UnixNano()

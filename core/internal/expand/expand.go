@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
@@ -166,6 +167,19 @@ func (e *Expander) hasSource(s Source) bool {
 	return false
 }
 
+// crtClient 复用于所有 crt.sh 请求：连接与 TLS 会话可复用，避免每次展开都重新握手。
+// 单次超时由请求的 context 控制（queryCT 里已带 WithTimeout）。
+var crtClient = &http.Client{Transport: &http.Transport{
+	Proxy:                 nil,
+	ForceAttemptHTTP2:     true,
+	MaxIdleConns:          16,
+	MaxIdleConnsPerHost:   4,
+	IdleConnTimeout:       90 * time.Second,
+	TLSHandshakeTimeout:   5 * time.Second,
+	ResponseHeaderTimeout: 5 * time.Second,
+	DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+}}
+
 // queryCT 查询 Certificate Transparency 日志 (crt.sh API)
 func (e *Expander) queryCT(ctx context.Context, domain string) []string {
 	url := fmt.Sprintf("https://crt.sh/?q=%%25.%s&output=json", domain)
@@ -179,8 +193,7 @@ func (e *Expander) queryCT(ctx context.Context, domain string) []string {
 	}
 	req.Header.Set("User-Agent", "hosts-optimizer/1.0")
 
-	client := &http.Client{Timeout: e.opts.Timeout}
-	resp, err := client.Do(req)
+	resp, err := crtClient.Do(req)
 	if err != nil {
 		return []string{}
 	}

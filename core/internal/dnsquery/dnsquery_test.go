@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -268,6 +269,11 @@ func TestUsableFiltersPollutedAddresses(t *testing.T) {
 		{"224.0.0.1", false, false},
 		{"100.64.0.1", false, false}, // CGNAT
 		{"198.18.0.1", false, false}, // 基准测试保留段
+		{"198.19.0.1", false, false}, // 同属 198.18.0.0/15
+		{"198.20.0.1", false, true},  // 段外必须放行
+		{"8.19.0.1", false, true},    // 第二段为 19 不能被误杀
+		{"183.19.0.5", false, true},
+		{"200.19.0.7", false, true},
 		{"203.0.113.5", false, false},
 		{"255.255.255.255", false, false},
 	}
@@ -275,5 +281,129 @@ func TestUsableFiltersPollutedAddresses(t *testing.T) {
 		if got := usable(net.ParseIP(c.ip), c.allowPrivate); got != c.want {
 			t.Errorf("usable(%s, allowPrivate=%v) = %v, want %v", c.ip, c.allowPrivate, got, c.want)
 		}
+	}
+}
+
+// 截断必须保留各来源的覆盖，而不是按地址大小切前 N。
+func TestPickDiverseKeepsSourceCoverage(t *testing.T) {
+	srcs := [][]string{
+		{"1.1.1.1", "1.1.1.2", "1.1.1.3", "1.1.1.4"},
+		{"2.2.2.1", "2.2.2.2"},
+	}
+
+	got := pickDiverse(srcs, 3)
+	want := []string{"1.1.1.1", "2.2.2.1", "1.1.1.2"}
+	if len(got) != len(want) {
+		t.Fatalf("limit=3 结果 = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("limit=3 结果 = %v, want %v", got, want)
+		}
+	}
+
+	// limit 超过候选总数时全部返回，不重复。
+	if got := pickDiverse(srcs, 100); len(got) != 6 {
+		t.Fatalf("limit=100 应返回全部 6 个，实际 %v", got)
+	}
+	// limit<=0 表示不截断。
+	if got := pickDiverse(srcs, 0); len(got) != 6 {
+		t.Fatalf("limit=0 应返回全部 6 个，实际 %v", got)
+	}
+	// 单个来源也要能填满 limit。
+	if got := pickDiverse([][]string{{"3.3.3.1", "3.3.3.2"}}, 5); len(got) != 2 {
+		t.Fatalf("单来源不足 limit 时应按实际数量返回，实际 %v", got)
+	}
+}
+
+// 证书池决定 TLS 配置，因此 transport 必须按池缓存，否则连接池会被串用。
+func TestDoHTransportCachedByRootPool(t *testing.T) {
+	if got := dohTransport(nil); got != sharedTransport {
+		t.Fatal("未指定证书池时应使用系统池 transport")
+	}
+	a := x509.NewCertPool()
+	b := x509.NewCertPool()
+	if dohTransport(a) != dohTransport(a) {
+		t.Fatal("同一证书池应复用同一个 transport，连接池才有意义")
+	}
+	if dohTransport(a) == dohTransport(b) {
+		t.Fatal("不同证书池不应共享 transport")
+	}
+	if dohTransport(a).TLSClientConfig == nil {
+		t.Fatal("自定义证书池必须挂到 TLS 配置上")
+	}
+}
+
+// startTCPDNSServer 起一个本地 DNS over TCP 服务，返回端口。
+func startTCPDNSServer(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+				var lenBuf [2]byte
+				if _, err := io.ReadFull(c, lenBuf[:]); err != nil {
+					return
+				}
+				q := make([]byte, int(binary.BigEndian.Uint16(lenBuf[:])))
+				if _, err := io.ReadFull(c, q); err != nil || len(q) < 12 {
+					return
+				}
+				resp := buildAResponse(binary.BigEndian.Uint16(q[:2]))
+				frame := make([]byte, 2+len(resp))
+				binary.BigEndian.PutUint16(frame[:2], uint16(len(resp)))
+				copy(frame[2:], resp)
+				_, _ = c.Write(frame)
+			}(c)
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+func TestParseServerTCP(t *testing.T) {
+	up, err := parseServer("tcp://1.2.3.4:5353")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if up.kind != "tcp" || up.addr != "1.2.3.4:5353" {
+		t.Fatalf("tcp:// 解析结果不符: %+v", up)
+	}
+	if _, err := parseServer("tcp://dns.alidns.com"); err == nil {
+		t.Fatal("TCP DNS 必须是字面 IP")
+	}
+}
+
+func TestCollectTCPUpstream(t *testing.T) {
+	port := startTCPDNSServer(t)
+	ips, err := CollectWithOptions(context.Background(), "www.example.com",
+		[]string{"tcp://127.0.0.1:" + strconv.Itoa(port)}, Options{Timeout: 3 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ips) != 1 || ips[0] != "93.184.216.34" {
+		t.Fatalf("TCP 上游结果 = %v", ips)
+	}
+}
+
+// 只监听 TCP 的服务上用裸 IP（UDP 路径）查询：UDP 无响应时应自动回退 TCP。
+func TestCollectFallsBackToTCP(t *testing.T) {
+	port := startTCPDNSServer(t)
+	ips, err := CollectWithOptions(context.Background(), "www.example.com",
+		[]string{"127.0.0.1:" + strconv.Itoa(port)}, Options{Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatalf("UDP 无响应时应回退 TCP: %v", err)
+	}
+	if len(ips) != 1 || ips[0] != "93.184.216.34" {
+		t.Fatalf("回退 TCP 的结果 = %v", ips)
 	}
 }
