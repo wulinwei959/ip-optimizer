@@ -2,6 +2,8 @@
 核心只读一个文件：`domains.json`。没有 `settings.env`、没有 cron 定时任务。编辑保存后下一轮自动生效（每轮重新读取文件），也可 `POST /refresh` 即时刷新，无需重启服务。
 **为什么是 JSON 而不是 YAML**：只用 Go 标准库 `encoding/json`。YAML 需要第三方模块，会引入 `go mod download`，与全离线构建、零依赖冲突。JSON 不支持注释，字段说明放在本文档。
 
+> **1.5.0 配置瘦身**：移除 `suppress_aaaa` 与 `outputs` 两个配置项——AAAA 抑制由 `agh.txt` 的 `$dnsrewrite` 语义天然完成，产物清单固定为 `hosts.txt` / `agh.txt` / `status.json` 三份。旧配置中残留的键会被自动忽略，升级无需手动清理。
+
 ## 字段
 
 ### 顶层

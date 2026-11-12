@@ -2,7 +2,7 @@
 
 本目录只解决**部署与分发**，不含业务核心实现。
 
-当前版本 **1.1.0**；技术实现见 [`docs/technical.md`](../docs/technical.md)，版本历史与验证记录见 [`docs/progress.md`](../docs/progress.md)。
+当前版本 **1.5.0**；技术实现见 [`docs/technical.md`](../docs/technical.md)，版本历史与验证记录见 [`docs/progress.md`](../docs/progress.md)。
 
 ## 当前取舍：主轨 = fnOS 纯原生 FPK
 
@@ -38,7 +38,7 @@ Linux / macOS / Git Bash：
 SKIP_PACK=1 ./deploy/scripts/build-native-fpk.sh x86   # 只编译，不调 fnpack
 ./deploy/scripts/build-native-fpk.sh x86
 ./deploy/scripts/build-native-fpk.sh arm
-# → deploy/dist/hosts-optimizer-native-1.0.9-x86.fpk / -arm.fpk
+# → deploy/dist/hosts-optimizer-native-<版本>-x86.fpk / -arm.fpk
 ```
 
 Windows PowerShell（开发机没有 bash / pwsh 时用这份等价脚本；脚本为纯 ASCII，规避中文 GBK/UTF-8 编码问题）：
@@ -78,6 +78,8 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
   - `HO_DNS_LISTEN`、`HO_DNS_TTL`（应答器监听地址与 TTL；前者接受 off 类词表禁用）
   - `HO_PROBE_TOP_N`、`HO_PROBE_FULL_EVERY`（自适应探测面：常规轮次只测「当前 IP + 前 N 个挑战者」，每 K 轮做一次全量扫描）
   - `HO_WATCH_INTERVAL_SECONDS`、`HO_WATCH_SWITCH_PERCENT`（健康探针：定期只测当前 IP，失效或明显变慢时触发即时轮次，不用等下一个整轮）
+  - `HO_EXPAND_CACHE_TTL_HOURS`（子域扩展缓存 TTL，默认 12 小时）
+  - `HO_UPDATE_CHECK`（填 `off` 关闭 GitHub 新版本检查）
   - `HO_ADMIN_TOKEN`（管理端点令牌；不设置时首次启动生成并持久化到 `$HO_DATA/admin-token`，重启复用，文件管理器可直接查看；设置后优先于文件）
 - 管理端点（`/api/*`、`/refresh`）需要令牌，订阅端点（`/`、`/hosts.txt`、`/agh.txt`、`/status.json`、`/healthz`）保持开放 —— 否则 AGH 拉不到订阅、用户也进不了界面
 - 日志：stdout + 内存环（界面「运行日志」）+ `$HO_DATA/logs/app.log`（8MB 轮转，保留 `app.log.1` 一份备份）
@@ -88,7 +90,7 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 
 ## 手动添加域名
 
-安装后编辑 `/var/apps/hosts-optimizer-native/etc/domains.json`，在 `domains` 数组追加对象。另两种方案（共享目录 / Web 编辑页）见 `config-schema/README.md`，当前骨架未启用。
+安装后编辑共享目录 `/vol1/@appshare/hosts-optimizer/data/domains.json`（文件管理器「应用文件」→ hosts-optimizer → data 可见），在 `domains` 数组追加对象，保存后 `POST /refresh` 即时生效。旧位置 `@appconf` 的配置在升级到 1.4.0+ 时启动自动一次性迁移。
 
 ## 冻结轨道 A / B
 
@@ -158,6 +160,16 @@ curl -X POST http://127.0.0.1:18088/refresh
 
 **1.1.0 变更**：新增内置 UDP DNS 应答器，AGH 按域名分流直连后，IP 切换最多一个 TTL（默认 60 秒）即可生效；所有配置项补齐图形化入口，并修复长域名与窄屏下的文字重叠。
 
+**1.2.0 变更**：性能与可用性优化——全局并发池、TCP+TLS 握手时延、自适应探测面（当前 IP + Top-N + 周期全量）、健康探针与快速故障转移、历史追加式分片、AGH 分流按长度拆行、DNS 应答器加固；新增管理令牌鉴权（`admin-token` 持久化）与 `/healthz` 健康探针；版本号经 ldflags 注入，`/healthz`、`-version` 与界面三处一致。
+
+**1.3.0 变更**：令牌与日志落到用户可见共享文件夹——`config/resource` 声明 data-share，管理令牌持久化到 `admin-token`（重启复用），运行日志落盘 `logs/app.log`（8MB 轮转）；`HO_DATA` 注入，`/healthz` 含 `data_dir`。
+
+**1.3.1 变更**：修复「禁用本组/单行禁用」后整页重载导致分组自动收起（改原地更新）；按 fnOS 官方 FPK 规范完善：`disable_authorization_path`、启动失败写 `TRIM_TEMP_LOGFILE`、补充升级/卸载向导。
+
+**1.4.0 变更**：子域扩展结果缓存（TTL 12h，手动刷新强制失效）；DNS 应答器支持 TCP（RFC 1035 长度前缀，UDP/TCP 同端口）；`domains.json` 迁移到用户可见共享目录（启动时一次性迁移）；`/refresh` 限流（10s/429）+ GitHub 新版本检查与页面提示。
+
+**1.5.0 变更**：长期运行稳定性——轮次锁改带超时信号量并统一六入口等待策略，整轮 deadline（2~15 分钟自适应）超时作废本轮；扩展缓存定时淘汰 + 配置失效、探针状态与快照按配置裁剪，`/healthz` 暴露轮次/锁/缓存/状态规模观测字段。界面重构：接入方式「DNS 应答器 / AGH 订阅」下拉二选一、切换即时生效；性能档位、切换灵敏度、探测 DNS、状态码白名单改为预设下拉；配置归集四段，管理令牌与检查更新移入「设置与关于」面板（位于页面底部，原独立「关于」卡片移除）。配置瘦身：移除 `suppress_aaaa` / `outputs`，旧键自动忽略。
+
 **仍需**：
 
 1. 确认桌面图标在真机显示（覆盖安装后可能要 `systemctl restart trim_app_center.service`）
@@ -172,3 +184,8 @@ curl -X POST http://127.0.0.1:18088/refresh
 - 直连 `18053` 查询 `github.com` 返回优选 IP，AAAA 返回 NODATA。
 - AGH `/control/dns_config` 写入完整分流规则后，经 53 端口查询 `github.com` 与 `raw.githubusercontent.com` 均返回优选 IP，TTL 为 60 秒。
 - AGH 运行配置与 fnOS 应用模板均保存相同分流规则，并保留普通 DNS 兜底，防止应用中心后续重启覆盖。
+
+## 1.5.0 真机验收（192.168.3.59）
+
+- 通过 fnOS 应用中心安装 1.5.0 x86 FPK，版本 1.5.0、运行状态正常，21 个域名配置完整保留，`dns_enabled` 生效。
+- 27 项回归 + 压测全过：healthz 观测字段（轮次耗时/超时计数/锁占用/缓存与状态规模）；接入模式双向切换保留域名、页面卡片随模式切换；`/api/update-check` 首次 200、60 秒限流 429；并发刷新 5 路均 202 且任务完成；轮次进行中并发切换返回 409、`round_lock_busy` 递增、超时计数为 0；禁用/启用与刷新后 DNS 应答器实测返回优选 IP；90 秒后规模快照稳定无膨胀。
