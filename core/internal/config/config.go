@@ -28,7 +28,6 @@ type Domain struct {
 	Port          int      `json:"port"`
 	Candidates    []string `json:"candidates"`
 	ExpectStatus  []int    `json:"expect_status"`
-	SuppressAAAA  *bool    `json:"suppress_aaaa"`
 	AllowPrivate  bool     `json:"allow_private"`
 	Expand        bool     `json:"expand"`
 	ExpandSources []string `json:"expand_sources"`
@@ -44,7 +43,6 @@ type Defaults struct {
 	HysteresisPercent      int       `json:"hysteresis_percent"`
 	HysteresisRounds       int       `json:"hysteresis_rounds"`
 	ExpectStatus           []int     `json:"expect_status"`
-	Outputs                []string  `json:"outputs"`
 	MaxCandidates          int       `json:"max_candidates"`
 	TCPRounds              int       `json:"tcp_rounds"`
 	TimeoutSeconds         int       `json:"timeout_seconds"`
@@ -86,7 +84,6 @@ type Target struct {
 	Port                int
 	Candidates          []string
 	ExpectStatus        []int
-	SuppressAAAA        bool
 	AllowPrivate        bool
 	Expand              bool
 	ExpandSources       []string
@@ -248,9 +245,6 @@ func applyDefaults(c *Config) {
 	}
 	if d.TimeoutSeconds <= 0 {
 		d.TimeoutSeconds = 3
-	}
-	if len(d.Outputs) == 0 {
-		d.Outputs = []string{"hosts.txt", "agh.txt", "status.json"}
 	}
 	// 展开功能默认值
 	if d.ExpandConcurrency <= 0 {
@@ -441,7 +435,6 @@ func (c *Config) Resolve(d Domain) Target {
 		Name:                strings.TrimSpace(d.Name),
 		Candidates:          append([]string(nil), d.Candidates...),
 		AllowPrivate:        d.AllowPrivate,
-		SuppressAAAA:        true,
 		ExpectStatus:        append([]int(nil), c.Defaults.ExpectStatus...),
 		Port:                c.Defaults.ProbePort,
 		SNI:                 strings.TrimSpace(d.SNI),
@@ -459,9 +452,6 @@ func (c *Config) Resolve(d Domain) Target {
 	}
 	if len(d.ExpectStatus) > 0 {
 		t.ExpectStatus = append([]int(nil), d.ExpectStatus...)
-	}
-	if d.SuppressAAAA != nil {
-		t.SuppressAAAA = *d.SuppressAAAA
 	}
 	// 域名级展开配置覆盖全局默认
 	if d.Expand {

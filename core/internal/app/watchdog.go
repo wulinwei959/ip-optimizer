@@ -78,6 +78,9 @@ func (a *App) watchOnce(ctx context.Context, rt *config.Runtime, interval time.D
 	}
 	degraded := checkCurrentIPs(ctx, targets, d, a.rootCAs)
 	if len(degraded) == 0 {
+		// 本轮所有 targets 都健康：清掉它们的退避状态，下次触发自然回落基础退避。
+		// 未进 targets（无生效 IP）的域名不动——它们不是健康，只是不可测。
+		a.resetWatchBackoff(targets)
 		return
 	}
 
@@ -112,9 +115,10 @@ func (a *App) watchOnce(ctx context.Context, rt *config.Runtime, interval time.D
 	}
 	sort.Strings(names)
 
-	// 与定时轮次共用 roundMu：不会并发探测，也不会与 /refresh 打架。
+	// 与定时轮次共用轮次锁：拿不到（上一轮异常长）时立即跳过本次检查，
+	// 不排队等待——下一个 watch interval 会重新发现 degraded，无正确性损失。
 	// forceExpand=false：定向轮次本就不展开子域名，缓存与否无关。
-	if _, err := a.doRoundFor(ctx, only, false); err != nil {
+	if _, err := a.doRoundFor(ctx, only, false, 0); err != nil {
 		log.Printf("健康探针触发的轮次失败（%s）: %v", strings.Join(names, ","), err)
 		return
 	}
@@ -164,6 +168,17 @@ func (a *App) markTriggered(names []string, now time.Time, base time.Duration, c
 	}
 }
 
+// resetWatchBackoff 删除一批域名的退避状态（健康重置）。删除而非归零：
+// 下次触发自动回落到基础退避，语义等价且实现最小。
+func (a *App) resetWatchBackoff(targets []watchTarget) {
+	a.watchMu.Lock()
+	defer a.watchMu.Unlock()
+	for _, t := range targets {
+		delete(a.watchStates, t.Name)
+	}
+	a.watchStatesSize.Store(int64(len(a.watchStates)))
+}
+
 // currentIP 读取某域名当前生效的 IP。
 func (a *App) currentIP(name string) string {
 	a.stateMu.RLock()
@@ -192,6 +207,25 @@ func (a *App) setWatchTriggered(names []string) {
 
 // watchTargets 汇总「已启用且已有生效 IP」的域名及其探测参数。
 func (a *App) watchTargets(cfg config.Config) []watchTarget {
+	// 修剪 watchStates：清理不在当前配置（含禁用域名，防反复加回/禁用又恢复抖动）中的
+	// 残留条目。watchTargets 每 watch interval 都跑，天然是「对齐配置与运行态」的汇聚点。
+	active := make(map[string]bool, len(cfg.Domains)*2)
+	for _, dom := range cfg.Domains {
+		name := strings.TrimSpace(dom.Name)
+		if name != "" {
+			active[name] = true
+			active[strings.ToLower(name)] = true
+		}
+	}
+	a.watchMu.Lock()
+	for name := range a.watchStates {
+		if !active[name] {
+			delete(a.watchStates, name)
+		}
+	}
+	a.watchStatesSize.Store(int64(len(a.watchStates)))
+	a.watchMu.Unlock()
+
 	a.stateMu.RLock()
 	defer a.stateMu.RUnlock()
 

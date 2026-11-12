@@ -12,7 +12,7 @@ import (
 
 // TestStartRefreshThrottle 验证手动刷新的 10 秒限流与运行中任务复用。
 func TestStartRefreshThrottle(t *testing.T) {
-	a := &App{}
+	a := &App{roundMu: newTimedMutex()}
 
 	// 无任务且刚刷新过 → 限流（不启动 goroutine）。
 	a.lastRefresh = time.Now()
@@ -69,5 +69,14 @@ func TestHealthzUpdateFields(t *testing.T) {
 	// 扩展缓存计数字段也应存在。
 	if _, ok := resp["expand_cache_hits"]; !ok {
 		t.Fatal("healthz 应含 expand_cache_hits 字段")
+	}
+	// 长期运行观测字段：轮次耗时/状态、超时与锁排队计数、各缓存规模。
+	for _, key := range []string{
+		"round_duration_ms", "round_last_status", "round_timeout_count",
+		"round_lock_busy", "expand_cache_size", "watch_states_size", "state_domains_size",
+	} {
+		if _, ok := resp[key]; !ok {
+			t.Fatalf("healthz 应含 %s 字段", key)
+		}
 	}
 }

@@ -197,3 +197,28 @@ func TestWatchTargetsSkipsUnvalidatedDomains(t *testing.T) {
 		t.Fatalf("只应检查上一轮通过校验的域名，得到 %v", names)
 	}
 }
+
+// 配置中已删除的域名，其退避状态应在 watchTargets 构建时被清理。
+func TestWatchTargetsPrunesRemovedStates(t *testing.T) {
+	a := &App{
+		state:       &store.State{Domains: map[string]*store.DomainState{}},
+		watchStates: map[string]watchState{"gone.com": {last: time.Now(), backoff: time.Minute}},
+	}
+	cfg := config.Config{Domains: []config.Domain{{Name: "ok.com"}}}
+	a.watchTargets(cfg)
+	if _, ok := a.watchStates["gone.com"]; ok {
+		t.Fatal("配置中已删除域名的退避状态应被修剪")
+	}
+	if a.watchStatesSize.Load() != 0 {
+		t.Fatalf("修剪后规模应为 0，实际 %d", a.watchStatesSize.Load())
+	}
+}
+
+// 本轮全部健康时，退避状态被重置（下次触发回落基础退避）。
+func TestResetWatchBackoffOnHealthy(t *testing.T) {
+	a := &App{watchStates: map[string]watchState{"a.com": {last: time.Now(), backoff: 4 * time.Minute}}}
+	a.resetWatchBackoff([]watchTarget{{Name: "a.com"}})
+	if _, ok := a.watchStates["a.com"]; ok {
+		t.Fatal("健康后应删除退避状态")
+	}
+}

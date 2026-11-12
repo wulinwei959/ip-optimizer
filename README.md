@@ -14,7 +14,7 @@
 
 仓库：<https://github.com/wulinwei959/ip-optimizer>
 
-当前版本：**1.4.0**（版本历史与验证记录见 [`docs/progress.md`](docs/progress.md)）
+当前版本：**1.5.0**（版本历史与验证记录见 [`docs/progress.md`](docs/progress.md)）
 
 ---
 
@@ -58,13 +58,14 @@ AdGuard Home 订阅
 - **失败不覆盖**：整轮校验全灭时保留上一轮产物，`hosts.txt` / `agh.txt` 返回 503 但绝不写空列表；`status.json` 仍为 200 并说明原因。
 - **配置热加载**：每轮重新读取 `domains.json`，增删域名下一轮自动生效；也可 `POST /refresh` 立即重跑，无需重启。
 - **重启可恢复**：启动时先读 `status.json` 恢复应答视图，再读磁盘上的本轮产物；不必等首轮探测结束就能对外提供订阅，也不会出现分流域名的解析真空期。
-- **内置 DNS 应答器**：额外监听一个 UDP 端口，把 AGH 送来的域名查询直接答成优选 IP。IP 切换的生效时间从「AGH 订阅刷新间隔（最低 1 小时）」降到「一个 TTL（默认 60 秒）」。域名匹配与 AGH 的 `||domain^` 对齐：精确匹配 + 向父域回退，不做后缀通配。命中但无可用 IP 时返回 `REFUSED`，宁可解析失败也不返回旧 IP。状态页「DNS 应答服务」卡片提供一键复制的分流规则与运行计数。
+- **内置 DNS 应答器**：额外监听一个 UDP 端口，把 AGH 送来的域名查询直接答成优选 IP。IP 切换的生效时间从「AGH 订阅刷新间隔（最低 1 小时）」降到「一个 TTL（默认 60 秒）」。域名匹配与 AGH 的 `||domain^` 对齐：精确匹配 + 向父域回退，不做后缀通配。命中但无可用 IP 时返回 `REFUSED`，宁可解析失败也不返回旧 IP。状态页「接入方式」卡片提供一键复制的分流规则与运行计数。
+- **接入模式二选一**：「基本设置 → AGH 接入模式」下拉选择 DNS 应答器（推荐）或 AGH 订阅（兼容），切换即时写回配置并秒级生效——订阅模式自动禁用应答器，订阅地址卡片随模式切换显示；切回 DNS 应答器时自动恢复上次的监听地址。
 - **域名发现**：在「编辑域名清单」输入主域名（如 `github.com`），自动从 CT 日志、字典与规则中发现相关子域名；下拉列表逐项勾选，点「添加」即可写入配置，无需手工抄写。
 - **展开域名弹窗**：域名与来源同排、IP 列表另起一行，长列表独立滚动且不遮挡操作按钮；查询失败时显示原因并可直接重试。
 - **统一命名与排版**：页面标题、窗口标题与应用名称统一为「Hosts 优选订阅」；优化中文字体栈、字号层级、表格等宽数字与图标标识。
-- **关于面板**：页面底部新增「关于」，展示版本号、GitHub 项目地址与使用说明；域名列表整体可折叠，默认收起。
+- **关于与设置面板**：「设置与关于」面板位于页面底部，集中展示版本号、GitHub 项目地址、使用说明、管理令牌、外观主题与「检查更新」；域名列表整体可折叠，默认收起。
 - **按主域名分组**：状态表按可注册主域名归类（如 `api.gitlab.com` 归入 `gitlab.com`），点分组标题展开该分类的全部域名；支持整组勾选、全部展开/收起。分组的展开状态保存在浏览器本地，禁用域名、禁用本组、勾选、切换 IP 或刷新完成后都不会自动收起，只有手动点击分组标题或「全部展开/收起」才会改变；清空搜索关键词后仍按上次的手动选择显示。
-- **图形化配置**：轮询周期、探测 DNS、并发、超时、滞回、子域名展开、DNS 应答器、HTTP 状态码白名单与产物勾选均在表单内直接填写；单个域名的 SNI、端口、候选 IP、展开来源、状态码白名单、允许私网 IP、抑制 AAAA 点该行「高级」展开。保存后自动写回 `domains.json` 并触发新一轮；需要精细控制时可切到 JSON 源码模式。
+- **图形化配置**：表单按「基本设置 / 高级探测参数 / DNS 应答器与子域名 / 域名列表」归集，配置项合并、常用项做成下拉——接入模式（DNS 应答器 / AGH 订阅二选一）、性能档位、切换灵敏度、探测 DNS 与 HTTP 状态码白名单均有预设，选择即写回具体数值，手改数值自动切回「自定义」；单个域名的 SNI、端口、候选 IP、展开来源、状态码白名单、允许私网 IP 点该行「高级」展开。保存后自动写回 `domains.json` 并触发新一轮；需要精细控制时可切到 JSON 源码模式。
 - **排版与窄屏适配**：表格固定列宽，长域名不会把邻列顶开导致文字重叠；分组标题过长时省略并悬停显示全名；窄屏下自动隐藏次要列、操作按钮改为网格堆叠。
 - **加密 DNS 上游**：`probe_dns` 支持 UDP、DoT、DoH 混用，例如 `tls://dns.alidns.com`、`https://dns.cloudflare.com/dns-query`；DoQ 需第三方 QUIC 库，未引入。
 - **主题跟随系统**：默认跟随系统的深/浅色设置，也可在页面手动切换「浅色 / 深色 / 跟随系统」，选择保存在浏览器本地。
@@ -77,12 +78,13 @@ AdGuard Home 订阅
 - **AGH 规则刷新**：「刷新 AGH 规则」按钮只根据当前快照重新生成 `agh.txt`，不重新探测 DNS/TCP；手动刷新选中域名或切换 IP 后也会自动同步订阅文件。
 - **异步刷新**：`POST /refresh` 立即返回 `task_id` 并在后台执行，页面轮询 `/api/refresh-status` 显示进度，长时间探测不再阻塞请求。
 - **fnOS 桌面入口**：桌面图标以 iframe 窗口打开状态页，可查看生效 IP / 延迟、复制订阅地址、刷新选中域名或单独重写 AGH 规则；表格支持勾选与批量操作。
-- **管理令牌鉴权**：管理端点需令牌，令牌持久化到用户可见共享目录 `admin-token`（重启复用），页面顶部填入即可；`HO_ADMIN_TOKEN` 可固定覆盖。
+- **管理令牌鉴权**：管理端点需令牌，令牌持久化到用户可见共享目录 `admin-token`（重启复用），在「设置与关于」面板填入即可；`HO_ADMIN_TOKEN` 可固定覆盖。
 - **用户可见数据目录**：配置、令牌、运行日志都落在文件管理器「应用文件」可见的共享文件夹，便于查看、编辑与备份；升级时旧配置自动一次性迁移，不丢域名。
 - **DNS 应答器 TCP**：与 UDP 同端口监听 TCP（RFC 1035 长度前缀），供不支持纯 UDP 的解析器回退；语义与计数和 UDP 一致。
 - **子域扩展缓存**：子域名发现结果按 TTL（默认 12 小时）缓存，定时轮次复用、手动刷新强制重新发现，显著降低重复发现开销。
 - **健康探针与自适应探测**：独立探针分钟级发现失效/变慢的当前 IP 并触发即时轮次；常规轮次只测「当前 IP + Top-N 挑战者」，周期性全量扫描，整轮共用并发池。
-- **刷新限流与新版本提示**：手动刷新 10 秒最小间隔（超出 429）；启动后异步检查 GitHub 新版本，`/healthz` 与页头徽标提示「发现新版本 X」（`HO_UPDATE_CHECK=off` 可关）。
+- **刷新限流与手动检查更新**：手动刷新 10 秒最小间隔（超出 429）；「设置与关于」面板提供「检查更新」按钮，手动向 GitHub 查询新版本并展示结果（60 秒限流，`HO_UPDATE_CHECK=off` 可整体关闭）。
+- **长稳治理（1.5.0）**：轮次锁改为带超时的互斥信号量，六处加锁入口差异化等待，整轮 deadline（2~15 分钟自适应）超时作废本轮而非挂死；扩展缓存定时淘汰并随配置失效，探针状态与状态快照按配置裁剪，`/healthz` 暴露轮次耗时、超时计数、锁占用、缓存与状态规模等观测字段，长期运行不膨胀。
 
 ---
 
@@ -96,7 +98,7 @@ AdGuard Home 订阅
 4. **打开桌面图标**：若覆盖安装后图标未出现，在 NAS 上执行 `systemctl restart trim_app_center.service` 再刷新桌面。
 5. **配置 AdGuard Home**（二选一）：
 
-   **推荐：DNS 应答器。** 打开状态页的「DNS 应答服务」卡片，复制分流规则，粘贴到 AGH 的「设置 → DNS 设置 → 上游 DNS 服务器」末尾：
+   **推荐：DNS 应答器。** 打开状态页的「接入方式」卡片，复制分流规则，粘贴到 AGH 的「设置 → DNS 设置 → 上游 DNS 服务器」末尾：
 
    ```
    [/github.com/raw.githubusercontent.com/]127.0.0.1:18053
@@ -221,7 +223,7 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 }
 ```
 
-`domains[]` 还支持 `candidates`（固定候选 IP 池）、`expect_status`（在 TLS 连接上校验 HTTP 状态码，默认关闭）、`allow_private`、`suppress_aaaa`。完整字段表、取值范围与校验规则见 [`deploy/config-schema/README.md`](deploy/config-schema/README.md)，示例见 [`deploy/config-schema/domains.example.json`](deploy/config-schema/domains.example.json)。
+`domains[]` 还支持 `candidates`（固定候选 IP 池）、`expect_status`（在 TLS 连接上校验 HTTP 状态码，默认关闭）、`allow_private`。完整字段表、取值范围与校验规则见 [`deploy/config-schema/README.md`](deploy/config-schema/README.md)，示例见 [`deploy/config-schema/domains.example.json`](deploy/config-schema/domains.example.json)。
 
 > 用 JSON 而非 YAML，是为了不引入 `go mod download`。
 
@@ -245,11 +247,12 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 | `PUT /api/domains` | 校验并原子写回 `domains.json`（要求 `Content-Type: application/json`） |
 | `POST /api/expand` | 按需发现主域名的相关子域名，返回解析结果（不修改配置） |
 | `GET /api/dns` | 应答器状态：`enabled` / `listen` / `addr` / `ttl` / 运行计数 / `agh_upstream` 分流规则 |
+| `POST /api/update-check` | 手动检查 GitHub 新版本（60 秒限流），返回 `latest_version` / `update_available` |
 | `GET /healthz` | 健康探针：版本、运行时长、`data_dir`、扩展缓存命中、`update_available` / `latest_version`、watchdog 统计（无需令牌） |
 
 文本端点返回 `ETag` / `Last-Modified`，支持 `If-None-Match` → 304。
 
-> **管理鉴权（1.2.0 起）**：`/api/*` 与 `/refresh` 需令牌（`X-Admin-Token` 头 / Bearer / `?token=`）。令牌在共享目录 `admin-token` 文件（文件管理器可见，重启不变），把它填进页面顶部输入框即可；`HO_ADMIN_TOKEN` 可固定覆盖。订阅端点与 `/healthz` 无需令牌。`POST /refresh` 有 10 秒最小间隔（超出返回 429），手动整轮刷新会强制重新展开子域名。
+> **管理鉴权（1.2.0 起）**：`/api/*` 与 `/refresh` 需令牌（`X-Admin-Token` 头 / Bearer / `?token=`）。令牌在共享目录 `admin-token` 文件（文件管理器可见，重启不变），把它填进「设置与关于」面板的令牌输入框即可；`HO_ADMIN_TOKEN` 可固定覆盖。订阅端点与 `/healthz` 无需令牌。`POST /refresh` 有 10 秒最小间隔（超出返回 429），手动整轮刷新会强制重新展开子域名。
 
 ---
 
@@ -329,6 +332,7 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 - **真机 1.0.9**：点击延迟可查看 4 个候选 IP 及延迟并手动切换生效；「刷新选中」只探测选中域名，完成后日志显示「AGH 订阅已同步」；「刷新 AGH 规则」只重写订阅文件且不触发探测。
 - **真机 1.0.10**：在图形化「域名列表」新增 `example.org` 并保存，页面立即出现该分组与「待探测」行（30/36）；移除后恢复 30/35，配置与分组一致。
 - **真机 1.1.0**：通过 fnOS 应用中心覆盖安装 x86 FPK，版本、配置、历史与产物均正确保留；内置 DNS 应答器监听 `127.0.0.1:18053`，AGH 通过完整分流规则直连本服务，经 AGH 查询 `github.com` / `raw.githubusercontent.com` 均返回优选 IP，TTL 为 60 秒，AAAA 返回 NODATA。
+- **真机 1.5.0（192.168.3.59）**：27 项回归 + 压测全过。healthz 新观测字段齐全；接入模式「DNS 应答器 / AGH 订阅」双向切换保留域名、页面卡片随模式切换；`/api/update-check` 首次 200、60 秒限流 429；5 路并发刷新均 202、任务完成；轮次进行中并发切换 3 次均返回 409，`round_lock_busy` 计数持续递增、`round_timeout_count` 保持 0；禁用/启用域名、刷新一轮后 DNS 应答器实测返回优选 IP；90 秒后规模快照稳定（21 域名、缓存与状态无膨胀）。
 
 **待验证 / 已知限制**
 

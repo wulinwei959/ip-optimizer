@@ -1,5 +1,5 @@
 appname=hosts-optimizer-native
-version=1.4.0
+version=1.5.0
 display_name=Hosts 优选订阅
 desc=飞牛原生服务：定时为自定义域名优选可用 IP，生成 hosts / AdGuard Home 订阅文件。单静态二进制，无 Docker、无运行时依赖。
 source=thirdparty
@@ -13,6 +13,6 @@ service_port=18088
 checkport=true
 ctl_stop=true
 disable_authorization_path=true
-changelog=1.4.0：① 子域扩展结果缓存（默认 12 小时 TTL，可配 expand_cache_ttl_hours / HO_EXPAND_CACHE_TTL_HOURS；定时轮次复用缓存，手动刷新强制重新发现，/healthz 暴露命中/未命中计数）。② DNS 应答器支持 TCP（RFC 1035 长度前缀，与 UDP 同端口，供不支持纯 UDP 的解析器回退）。③ domains.json 迁移到用户可见共享目录（文件管理器可查看/编辑/备份；升级时自动一次性迁移旧配置，不丢域名）。④ 手动刷新限流（10 秒最小间隔，超出返回 429）+ GitHub 新版本检查（/healthz 与页头徽标提示，HO_UPDATE_CHECK=off 可关）。
+changelog=1.5.0：① 长期运行稳定性：轮次锁改为带超时的信号量实现并统一六个入口的等待策略，整轮增加 deadline（按轮询周期 2~15 分钟自适应），超时作废本轮保留上一轮产物；子域扩展缓存增加定时淘汰与配置变更失效，健康探针状态与状态快照按配置裁剪，/healthz 暴露轮次耗时/超时次数/锁占用/缓存与状态规模等观测字段。② 界面操作重构：接入方式改为「DNS 应答器 / AGH 订阅」下拉二选一、切换即时生效；性能档位、切换灵敏度、探测 DNS、状态码白名单全部改为预设下拉，选择写回具体数值、手改自动切自定义；配置项归集为四段，管理令牌移入「设置与关于」面板，更新检查改为面板内手动按钮。③ 配置瘦身：移除已无作用的 suppress_aaaa 与 outputs 字段，旧配置残留键自动忽略。
 desktop_uidir=ui
 desktop_applaunchname=hosts-optimizer-native.main

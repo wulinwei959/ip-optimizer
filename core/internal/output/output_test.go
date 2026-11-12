@@ -9,8 +9,8 @@ import (
 
 func testEntries() []Entry {
 	return []Entry{
-		{Name: "github.com", IP: "140.82.114.4", LatencyMS: 42.36, Reason: "首次采用", Candidates: 12, Validated: 5, SuppressAAAA: true},
-		{Name: "raw.githubusercontent.com", IP: "185.199.108.133", LatencyMS: 55.1, Reason: "保持当前最优", Candidates: 8, Validated: 4, SuppressAAAA: true},
+		{Name: "github.com", IP: "140.82.114.4", LatencyMS: 42.36, Reason: "首次采用", Candidates: 12, Validated: 5},
+		{Name: "raw.githubusercontent.com", IP: "185.199.108.133", LatencyMS: 55.1, Reason: "保持当前最优", Candidates: 8, Validated: 4},
 	}
 }
 

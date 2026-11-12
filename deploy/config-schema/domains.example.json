@@ -32,7 +32,6 @@
     "probe_full_every": 6,
     "watch_interval_seconds": 60,
     "watch_switch_percent": 100,
-    "outputs": ["hosts.txt", "agh.txt", "status.json"],
     "expand_concurrency": 10,
     "expand_timeout_seconds": 10,
     "expand_max_subdomains": 50,

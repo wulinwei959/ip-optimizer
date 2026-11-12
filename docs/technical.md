@@ -1,10 +1,10 @@
 # 技术文档
 
-> 适用版本：1.4.0 · 更新：2026-11-12
+> 适用版本：1.5.0 · 更新：2026-11-12
 >
 > 本文描述内部实现与数据契约；配置字段与部署步骤见 [`deploy/config-schema/README.md`](../deploy/config-schema/README.md) 与 [`deploy/README.md`](../deploy/README.md)。
 
-> 1.2.0 起新增管理令牌鉴权、健康探针（watchdog）与自适应探测面；1.3.0 起令牌/日志落到用户可见共享目录（`HO_DATA`）；1.4.0 起新增子域扩展缓存、DNS 应答器 TCP、`domains.json` 迁移共享目录、`/refresh` 限流与 GitHub 新版本检查（`internal/update`）。
+> 1.2.0 起新增管理令牌鉴权、健康探针（watchdog）与自适应探测面；1.3.0 起令牌/日志落到用户可见共享目录（`HO_DATA`）；1.4.0 起新增子域扩展缓存、DNS 应答器 TCP、`domains.json` 迁移共享目录、`/refresh` 限流与 GitHub 新版本检查（`internal/update`）。1.5.0 起轮次锁改为带超时信号量（`internal/app/roundlock.go`）、整轮 deadline 超时作废、扩展缓存/探针状态/快照周期裁剪，`/healthz` 增加轮次耗时/超时计数/锁占用/缓存与状态规模观测字段；接入方式改为「DNS 应答器 / AGH 订阅」下拉二选一，管理令牌与检查更新移入「设置与关于」面板；移除 `suppress_aaaa` / `outputs` 配置项（旧键自动忽略）。
 
 ## 1. 架构总览
 
@@ -59,7 +59,7 @@
 | `internal/expand` | 子域名发现：CT 日志、字典、内置规则 |
 | `internal/dnsserver` | 内置 UDP/TCP DNS 应答器：极简报文解析、`View` 父域回退匹配、原子视图替换，供 AGH 上游分流 |
 | `internal/update` | GitHub 新版本检查：语义化版本比较、`releases/latest` 异步查询、小时级复检（1.4.0） |
-| `internal/app` | HTTP 路由、探测编排、异步任务、快照管理、管理 API、扩展缓存、watchdog |
+| `internal/app` | HTTP 路由、探测编排、异步任务、快照管理、管理 API、扩展缓存、watchdog、轮次锁（`roundlock.go`，1.5.0） |
 
 ## 3. 一轮探测
 
@@ -71,6 +71,8 @@
 6. 落盘：`output.Build` 生成三份产物，`util.AtomicWrite` 以「临时文件 → Sync → Rename」写入。
 7. 历史：每域名一行写入当月 `history/rounds-YYYYMM.jsonl.gz`。
 8. 快照：在 `a.mu` 保护下替换内存快照，订阅端点立即读到新内容。
+
+**轮次锁与超时治理（1.5.0）**：所有会改产物/状态的操作统一经 `roundMu`（`roundlock.go`，带超时的信号量式互斥）串行化。六处加锁入口按语义差异化等待：轮次入口等到当前轮结束，写配置与切换入口等短、拿不到锁即快速失败（409）；整轮 deadline 取 `max(scheduleMinutes, 2)` 与 15 分钟的最小值，超时作废本轮（保留上一轮产物），避免慢网络或挂死把后续轮次全部堵死。锁占用与超时作废计数见 `/healthz`。
 
 **健康探针（watchdog）**：独立 goroutine 每 `watch_interval_seconds` 只测各域名「当前生效 IP」，失效或相对自身上一轮时延变慢超过 `watch_switch_percent` 时触发一次定向即时轮次（带指数退避），把故障发现延迟从整轮周期降到分钟级。定向轮次不展开子域名。
 
@@ -153,7 +155,8 @@
 | POST | `/api/switch` | 手动切换候选 IP 并立即生效 |
 | POST | `/api/disable` | 启用/禁用域名（按 names 或 group），禁用后立即从产物移除 |
 | GET | `/api/logs` | 增量读取运行日志 |
-| GET | `/healthz` | 健康探针：版本、运行时长、`data_dir`、扩展缓存命中/未命中、`update_available` / `latest_version`、watchdog 统计（公开，无需令牌） |
+| GET | `/healthz` | 健康探针：版本、运行时长、`data_dir`、扩展缓存命中/未命中、轮次耗时/超时计数/锁占用、探针与状态规模、`update_available` / `latest_version`、watchdog 统计（公开，无需令牌） |
+| POST | `/api/update-check` | 手动检查 GitHub 新版本（60 秒限流），返回 `latest_version` / `update_available` |
 
 **鉴权（1.2.0 起）**：管理端点（`/api/*`、`/refresh`）需令牌，经 `X-Admin-Token` 头、`Authorization: Bearer` 或 `?token=` 传递，常量时间比较。令牌优先级：`HO_ADMIN_TOKEN` 环境变量 > 共享目录 `admin-token` 文件 > 启动时生成并持久化。订阅端点（`/hosts.txt`、`/agh.txt`、`/status.json`、`/healthz`）与首页无需令牌。写接口仍要求 `Content-Type: application/json`（阻止简单跨站表单）。服务默认监听所有网卡，只应部署在内网。
 
@@ -163,7 +166,7 @@
 
 | 锁 | 保护对象 | 说明 |
 | --- | --- | --- |
-| `roundMu` | 探测轮次、手动切换、AGH 重建 | 串行化所有会改产物/状态的操作 |
+| `roundMu` | 探测轮次、手动切换、AGH 重建 | 带超时的信号量式互斥（`roundlock.go`，1.5.0）；串行化所有会改产物/状态的操作，六入口差异化等待，整轮 deadline 超时作废 |
 | `refreshMu` | `refreshTask`、`lastRefresh` | 异步任务状态与限流；已有任务时复用 |
 | `stateMu` | `store.State` | 每域名决策与候选列表读写 |
 | `mu` | `snap` 快照 | 订阅端点读、轮次结束替换 |
@@ -181,7 +184,7 @@
 - 延迟单元格可打开候选 IP 弹窗并手动切换。
 - 展开域名弹窗固定头部与底部操作区，仅结果列表滚动；域名与来源同排、IP 列表另起一行，失败时可直接重试。
 - 页面标题、窗口标题与应用名称统一为「Hosts 优选订阅」；中文字体栈与等宽字体分别由 `--sans` / `--mono` 变量控制。
-- 页面底部「关于」展示编译版本号（由入口传入）、GitHub 项目地址与使用说明；域名列表区块默认折叠。
+- 页面底部「设置与关于」面板集中管理令牌、外观主题、版本信息（编译版本号由入口传入）、GitHub 项目地址、使用说明与「检查更新」；独立「关于」卡片已移除。域名列表区块默认折叠。
 - 历史趋势用原生 SVG 绘制平均延迟曲线。
 - 日志面板轮询 `/api/logs`，支持自动刷新、关键字筛选、清空视图。
 - 主题支持浅色/深色/跟随系统，选择存 `localStorage`。
@@ -210,7 +213,7 @@ powershell -File deploy/scripts/build-native-fpk.ps1 x86
 
 ## 11. 测试
 
-- 单元测试：`config`（含 DNS 默认值/环境变量/校验边界、扩展缓存 TTL、配置迁移）、`dnsquery`（含 DoT/DoH 与 wire format 交叉验证）、`dnsserver`（语义矩阵、父域回退、视图热替换、nil 安全、畸形不崩溃、TCP 往返/长度前缀/超限帧）、`probe`、`store`（滞回/候选持久化）、`history`（分片/保留期/过滤）、`app`（合并/定向选择/API、扩展缓存、刷新限流、healthz 字段）、`update`（版本比较、禁用 no-op）、`logfile`（轮转/重开追加）。CI 以 `go test -race` 覆盖竞态。
+- 单元测试：`config`（含 DNS 默认值/环境变量/校验边界、扩展缓存 TTL、配置迁移）、`dnsquery`（含 DoT/DoH 与 wire format 交叉验证）、`dnsserver`（语义矩阵、父域回退、视图热替换、nil 安全、畸形不崩溃、TCP 往返/长度前缀/超限帧）、`probe`、`store`（滞回/候选持久化）、`history`（分片/保留期/过滤）、`app`（合并/定向选择/API、扩展缓存、刷新限流、healthz 字段、轮次锁六入口与超时作废、状态快照裁剪、更新检查端点）、`update`（版本比较、禁用 no-op）、`logfile`（轮转/重开追加）。CI 以 `go test -race` 覆盖竞态。
 - 本地端到端：启动临时配置，验证探测、产物、ETag/304、异步刷新、历史、切换。
 - 真机：fnOS x86 安装/卸载重装、启停、订阅端点、配置保留、1.0.x 功能回归。
 
@@ -319,7 +322,7 @@ AGH 提供 `/control/dns_config` 配置接口，可通过 `upstream_dns` 数组�
 
 ### 配置入口
 
-`defaults.dns.listen` / `defaults.dns.ttl` / `defaults.expect_status` / `defaults.outputs`，以及域名级 `expect_status` / `allow_private` / `suppress_aaaa` 都可在「编辑域名清单」的图形化表单内修改；`formToConfig` 对空值一律 `delete`，不会把用户未设置的字段显式写进 `domains.json`。`off` 类词表（`off` / `disabled` / `none` / `0` / `false`）填在监听地址输入框内即可禁用应答器。
+`defaults.dns.listen` / `defaults.dns.ttl` / `defaults.expect_status`，以及域名级 `expect_status` / `allow_private` 都可在「编辑域名清单」的图形化表单内修改；表单按「基本设置 / 高级探测参数 / DNS 应答器与子域名 / 域名列表」归集，接入模式（DNS 应答器 / AGH 订阅二选一）、性能档位、切换灵敏度、探测 DNS 与状态码白名单均为下拉预设，选择后写回具体数值，手改数值自动切回「自定义」。`formToConfig` 对空值一律 `delete`，不会把用户未设置的字段显式写进 `domains.json`。`off` 类词表（`off` / `disabled` / `none` / `0` / `false`）填在监听地址输入框内即可禁用应答器。
 
 ### 前端渲染注意点
 

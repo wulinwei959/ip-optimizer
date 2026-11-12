@@ -13,13 +13,12 @@ import (
 
 // Entry 是单个域名本轮最终生效的结果。
 type Entry struct {
-	Name         string
-	IP           string
-	LatencyMS    float64
-	Reason       string
-	Validated    int
-	Candidates   int
-	SuppressAAAA bool
+	Name       string
+	IP         string
+	LatencyMS  float64
+	Reason     string
+	Validated  int
+	Candidates int
 }
 
 // RoundInfo 是本轮探测的元信息。
@@ -34,13 +33,12 @@ type RoundInfo struct {
 
 // StatusDomain 是 status.json 中的单域名条目。
 type StatusDomain struct {
-	Name         string  `json:"name"`
-	IP           string  `json:"ip,omitempty"`
-	LatencyMS    float64 `json:"latency_ms,omitempty"`
-	Candidates   int     `json:"candidates"`
-	Validated    int     `json:"validated"`
-	SuppressAAAA bool    `json:"suppress_aaaa"`
-	Reason       string  `json:"reason"`
+	Name       string  `json:"name"`
+	IP         string  `json:"ip,omitempty"`
+	LatencyMS  float64 `json:"latency_ms,omitempty"`
+	Candidates int     `json:"candidates"`
+	Validated  int     `json:"validated"`
+	Reason     string  `json:"reason"`
 }
 
 // Status 是 /status.json 的内容。
@@ -96,7 +94,7 @@ func Build(entries []Entry, now time.Time, round RoundInfo) (*Snapshot, error) {
 		sd := StatusDomain{
 			Name: e.Name, IP: e.IP, LatencyMS: round1(e.LatencyMS),
 			Candidates: e.Candidates, Validated: e.Validated,
-			SuppressAAAA: e.SuppressAAAA, Reason: e.Reason,
+			Reason: e.Reason,
 		}
 		st.Domains = append(st.Domains, sd)
 		if e.IP == "" {
