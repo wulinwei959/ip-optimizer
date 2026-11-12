@@ -319,7 +319,7 @@ AGH 提供 `/control/dns_config` 配置接口，可通过 `upstream_dns` 数组�
 
 ### 配置入口
 
-`defaults.dns.listen` / `defaults.dns.ttl` / `defaults.expect_status` / `defaults.outputs`，以及域名级 `expect_status` / `allow_private` / `suppress_aaaa` 都可在「编辑域名清单」的图形化表单内修改；`formToConfig` 对空值一律 `delete`，不会把用户未设置的字段显式写进 `domains.json`。`off` 类词表（`off` / `disabled` / `none` / `0` / `false`）填在监听地址输入框内即可禁用应答器。
+`defaults.dns.listen` / `defaults.dns.ttl` / `defaults.expect_status`，以及域名级 `expect_status` / `allow_private` 都可在「编辑域名清单」的图形化表单内修改；表单按「基本设置 / 高级探测参数 / DNS 应答器与子域名 / 域名列表」归集，接入模式（DNS 应答器 / AGH 订阅二选一）、性能档位、切换灵敏度、探测 DNS 与状态码白名单均为下拉预设，选择后写回具体数值，手改数值自动切回「自定义」。`formToConfig` 对空值一律 `delete`，不会把用户未设置的字段显式写进 `domains.json`。`off` 类词表（`off` / `disabled` / `none` / `0` / `false`）填在监听地址输入框内即可禁用应答器。
 
 ### 前端渲染注意点
 

@@ -136,3 +136,63 @@ func TestExpandSubdomainsInvalidSourceNotCached(t *testing.T) {
 		t.Fatal("失败不应写入缓存")
 	}
 }
+
+// 后台清扫：不在配置中与超过 TTL 的条目被删除，配置内的保留。
+func TestSweepExpandCache(t *testing.T) {
+	a := &App{}
+	opts := expandOpts(expand.SourceWordlist)
+	a.expandCachePut("keep.com", opts, resolvedResults())
+	a.expandCachePut("gone.com", opts, resolvedResults())
+	a.expandCachePut("expired.com", opts, resolvedResults())
+	// 把过期条目的时间拨到 TTL 之外。
+	a.expandCacheMu.Lock()
+	e := a.expandCache["expired.com"]
+	e.savedAt = time.Now().Add(-25 * time.Hour)
+	a.expandCache["expired.com"] = e
+	a.expandCacheMu.Unlock()
+
+	a.sweepExpandCache(map[string]bool{"keep.com": true}, 12)
+
+	if _, ok := a.expandCache["keep.com"]; !ok {
+		t.Fatal("配置内条目应保留")
+	}
+	if _, ok := a.expandCache["gone.com"]; ok {
+		t.Fatal("不在配置中的条目应被清扫")
+	}
+	if _, ok := a.expandCache["expired.com"]; ok {
+		t.Fatal("超过 TTL 的条目应被清扫")
+	}
+	if a.expandCacheSize.Load() != 1 {
+		t.Fatalf("缓存规模应为 1，实际 %d", a.expandCacheSize.Load())
+	}
+}
+
+// 配置写路径即时回收：不在新配置中的条目立即消失。
+func TestEvictExpandCacheExcept(t *testing.T) {
+	a := &App{}
+	opts := expandOpts(expand.SourceWordlist)
+	a.expandCachePut("keep.com", opts, resolvedResults())
+	a.expandCachePut("gone.com", opts, resolvedResults())
+
+	a.evictExpandCacheExcept(map[string]bool{"keep.com": true})
+
+	if _, ok := a.expandCache["keep.com"]; !ok {
+		t.Fatal("keep 集合内条目应保留")
+	}
+	if _, ok := a.expandCache["gone.com"]; ok {
+		t.Fatal("不在 keep 集合的条目应被回收")
+	}
+}
+
+// parsedDomainSet 同时收录原文与小写键，大小写混写不误判。
+func TestParsedDomainSetCaseInsensitive(t *testing.T) {
+	set := parsedDomainSet([]config.Domain{{Name: "GitHub.com"}, {Name: " "}, {Name: "a.com"}})
+	for _, key := range []string{"GitHub.com", "github.com", "a.com"} {
+		if !set[key] {
+			t.Fatalf("集合应含 %q", key)
+		}
+	}
+	if set[""] {
+		t.Fatal("空域名不应入集合")
+	}
+}

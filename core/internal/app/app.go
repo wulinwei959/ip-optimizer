@@ -55,6 +55,10 @@ type App struct {
 	// updateChecker 周期性检查 GitHub 新版本（HO_UPDATE_CHECK=off 可关）。
 	updateChecker *update.Checker
 
+	// 手动检查更新的限流状态：60 秒内重复触发返回 429。
+	updateCheckMu   sync.Mutex
+	lastUpdateCheck time.Time
+
 	// 健康探针退避：记录每个域名上次触发即时轮次的时间与退避间隔。
 	watchMu            sync.Mutex
 	watchStates        map[string]watchState
@@ -64,7 +68,10 @@ type App struct {
 
 	mu           sync.RWMutex
 	snap         *output.Snapshot
-	roundMu      sync.Mutex
+	// roundMu 是带超时获取能力的轮次锁（channel 令牌实现），见 roundlock.go。
+	// 各入口按自身性质用 tryLockTimeout 限时等待：周期任务拿不到即跳过，
+	// 用户显式操作拿不到即返回 409，都不允许无限排队。
+	roundMu     *timedMutex
 	lastSchedule int
 
 	// DNS 应答器（AdGuard Home 上游分流模式）
@@ -91,6 +98,15 @@ type App struct {
 	expandCache   map[string]expandCacheEntry
 	expandHits    atomic.Uint64
 	expandMisses  atomic.Uint64
+	expandCacheSize atomic.Int64 // 当前缓存条目数，/healthz 观测有界化是否生效
+
+	// 长期运行观测（/healthz）：轮次耗时、超时/失败计数、锁排队计数、各缓存规模。
+	roundDurationMs   atomic.Int64
+	roundTimeoutCount atomic.Uint64
+	roundLastStatus   atomic.Value // string: ok / timeout / error
+	lockBusyCount     atomic.Uint64
+	watchStatesSize   atomic.Int64
+	stateDomainsSize  atomic.Int64
 
 	// DNS 应答器生命周期：监听地址变更时需要重绑，故保存根 ctx 与取消函数。
 	dnsBaseCtx context.Context
@@ -169,6 +185,7 @@ func New(rt *config.Runtime, version string) (*App, error) {
 		lastSchedule:  rt.Config.Defaults.ScheduleMinutes,
 		startedAt:     time.Now(),
 		updateChecker: update.New(version),
+		roundMu:       newTimedMutex(),
 	}
 	// 必须先于 recoverSnapshot：恢复流程会刷新应答视图。
 	a.initDNSServer(rt)
@@ -256,6 +273,7 @@ var adminPaths = map[string]bool{
 	"/api/switch":      true,
 	"/api/refresh-agh": true,
 	"/api/disable":     true,
+	"/api/update-check": true,
 }
 
 // admin 给管理端点加一层令牌校验，供直接注册在 mux 上的路由复用。
@@ -329,6 +347,7 @@ func (a *App) Run(ctx context.Context) error {
 	mux.HandleFunc("/", a.handle)
 	mux.HandleFunc("/api/refresh-status", a.admin(a.handleRefreshStatus))
 	mux.HandleFunc("/api/dns", a.admin(a.handleDNSStats))
+	mux.HandleFunc("/api/update-check", a.admin(a.handleUpdateCheck))
 	srv := &http.Server{
 		Addr: ":" + a.port, Handler: mux,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -347,6 +366,8 @@ func (a *App) Run(ctx context.Context) error {
 	a.ensureDNSServerStarted()
 	// 健康探针：定时只测当前 IP，失效/变慢时触发即时轮次，把故障发现延迟降到分钟级。
 	go a.watchLoop(ctx)
+	// 子域扩展缓存清扫：定期清理过期与已不在配置中的条目，兜住惰性清理漏掉的泄漏。
+	go a.expandSweeper(ctx)
 	// 新版本检查：启动后异步查一次 GitHub releases/latest，随后每小时复检。
 	go a.updateChecker.Run(ctx)
 
@@ -376,26 +397,53 @@ func (a *App) Run(ctx context.Context) error {
 	}
 }
 
+// errRoundBusy 表示轮次锁在限时内未拿到：周期任务应跳过本 tick，
+// 用户显式操作应返回 409 由其决定重试时机。
+var errRoundBusy = errors.New("轮次锁繁忙，暂未拿到探测锁")
+
+// roundBudget 是单轮探测的整体预算。上限 15 分钟：单个异常轮次被此保险丝截断，
+// 避免把看门狗、手动刷新等所有入口全部堵在轮次锁上；下限 2 分钟：正常一轮
+// （几十秒）有充足余量吸收上游 DNS 拖长、候选面全灭升级全量等尾部情况。
+func roundBudget(scheduleMinutes int) time.Duration {
+	if scheduleMinutes < 2 {
+		scheduleMinutes = 2
+	}
+	if scheduleMinutes > 15 {
+		scheduleMinutes = 15
+	}
+	return time.Duration(scheduleMinutes) * time.Minute
+}
+
 // doRound 执行一轮全量探测（定时轮次，复用子域扩展缓存）。
 func (a *App) doRound(ctx context.Context) (int, error) {
-	return a.doRoundFor(ctx, nil, false)
+	return a.doRoundFor(ctx, nil, false, 5*time.Minute)
 }
 
 // doRoundFor 执行一轮；only 非空时只刷新指定域名，并把结果合并回现有快照。
 // forceExpand 为真时整轮强制重新展开子域名（手动 /refresh 语义：用户主动刷新视为要最新发现）。
-// roundMu 保证定时器与 /refresh 不会并发探测。
+// lockWait 是拿轮次锁的等待上限：0 表示拿不到立即跳过；周期任务传较长上限、
+// 拿不到跳过本 tick；用户显式操作传短上限、拿不到返回 errRoundBusy（调用方映射为 409）。
 // 每轮重新读取 domains.json，因此手动增删域名后下一轮自动生效，无需重启。
-func (a *App) doRoundFor(ctx context.Context, only map[string]bool, forceExpand bool) (int, error) {
-	a.roundMu.Lock()
-	defer a.roundMu.Unlock()
+func (a *App) doRoundFor(ctx context.Context, only map[string]bool, forceExpand bool, lockWait time.Duration) (int, error) {
+	if !a.roundMu.tryLockTimeout(lockWait) {
+		a.lockBusyCount.Add(1)
+		log.Printf("轮次锁繁忙，未获取到探测锁（等待上限 %v）", lockWait)
+		return a.lastSchedule, errRoundBusy
+	}
+	defer a.roundMu.unlock()
 
 	rt, err := config.Load()
 	if err != nil {
 		log.Printf("配置加载失败（保留上一轮产物）: %v", err)
+		a.roundLastStatus.Store("error")
 		return a.lastSchedule, err
 	}
 	a.lastSchedule = rt.Config.Defaults.ScheduleMinutes
 	d := rt.Config.Defaults
+	// 整轮预算：拿锁等待不计入，只约束探测本身。超时即整轮作废，保留上一轮产物。
+	roundCtx, cancel := context.WithTimeout(ctx, roundBudget(d.ScheduleMinutes))
+	defer cancel()
+	ctx = roundCtx
 	// DNS 应答器的 TTL 与分流域名清单每轮跟随配置，改完 domains.json 下一轮生效。
 	a.dnsTTL.Store(int64(d.DNS.TTL))
 	a.applyDNSListen(d.DNS.Listen)
@@ -461,6 +509,14 @@ func (a *App) doRoundFor(ctx context.Context, only map[string]bool, forceExpand 
 		}(t)
 	}
 	wg.Wait()
+	// 超时即整轮作废：不做部分合并（部分域名条目会让产物半新半旧），
+	// 不换快照、不写历史，保留上一轮产物。
+	if ctx.Err() != nil {
+		a.roundTimeoutCount.Add(1)
+		a.roundLastStatus.Store("timeout")
+		log.Printf("本轮超时作废，保留上一轮产物: %v", ctx.Err())
+		return d.ScheduleMinutes, ctx.Err()
+	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 
 	refreshed := entries
@@ -481,6 +537,12 @@ func (a *App) doRoundFor(ctx context.Context, only map[string]bool, forceExpand 
 		RoundID:         a.roundSeq.Add(1),
 	}
 	a.appendHistory(refreshed, now, fmt.Sprintf("r%d", a.roundSeq.Load()))
+	// 全量轮末尾修剪 state.json：删除配置中已不存在域名的状态条目。
+	// 仅全量轮（only==nil）执行，按本轮启动时的配置快照判定（含禁用域名——其候选/IP
+	// 对重新启用有价值，保留与现有行为一致）。键归一比对，避免大小写混写误删。
+	if only == nil {
+		a.pruneStateDomains(parsedDomainSet(rt.Config.Domains))
+	}
 	a.stateMu.Lock()
 	stateData := a.state.Snapshot(now)
 	a.stateMu.Unlock()
@@ -496,6 +558,8 @@ func (a *App) doRoundFor(ctx context.Context, only map[string]bool, forceExpand 
 	a.snap = snap
 	a.mu.Unlock()
 	a.applyDNSSnapshot(snap)
+	a.roundDurationMs.Store(time.Since(started).Milliseconds())
+	a.roundLastStatus.Store("ok")
 	log.Printf("本轮完成：%d/%d 个域名生效，产物已写入 %s", snap.Status.ActiveCount, len(entries), filepath.Dir(a.hostsPath))
 	return d.ScheduleMinutes, nil
 }
@@ -515,9 +579,10 @@ func (a *App) probeDomain(ctx context.Context, t config.Target, d config.Default
 	// 在省下每轮几十次连接的同时保留发现新 IP 的通道。
 	set := probeSet(ips, a.domainState(t.Name), d.ProbeTopN, d.ProbeFullEvery, a.roundSeq.Load())
 	results := probe.ProbeAll(ctx, set, checker, sem)
-	if len(results) == 0 && len(ips) > len(set) {
+	if len(results) == 0 && len(ips) > len(set) && ctx.Err() == nil {
 		// 常规探测面全灭时升级为全量：否则会把「候选面里还有可用 IP」误判成整轮全灭，
-		// 一直沿用已经失效的旧 IP，直到下一次全量扫描。
+		// 一直沿用已经失效的旧 IP，直到下一次全量扫描。超时预算已耗尽时不再升级，
+		// 避免白白再打一轮全量烧预算。
 		log.Printf("[%s] 常规探测面全灭，升级为全量扫描（%d 个候选）", t.Name, len(ips))
 		results = probe.ProbeAll(ctx, ips, checker, sem)
 	}
@@ -533,7 +598,7 @@ func (a *App) probeDomain(ctx context.Context, t config.Target, d config.Default
 	entry := output.Entry{
 		Name: t.Name, IP: dec.IP, LatencyMS: dec.LatencyMS,
 		Reason: dec.Reason, Validated: dec.Validated,
-		Candidates: len(ips), SuppressAAAA: t.SuppressAAAA,
+		Candidates: len(ips),
 	}
 	log.Printf("[%s] 候选 %d → 探测面 %d → 校验通过 %d → 生效 %q（%s）", t.Name, len(ips), len(set), len(results), dec.IP, dec.Reason)
 	return entry
@@ -631,7 +696,7 @@ func statusToEntries(domains []output.StatusDomain) []output.Entry {
 	for _, s := range domains {
 		out = append(out, output.Entry{
 			Name: s.Name, IP: s.IP, LatencyMS: s.LatencyMS, Reason: s.Reason,
-			Validated: s.Validated, Candidates: s.Candidates, SuppressAAAA: s.SuppressAAAA,
+			Validated: s.Validated, Candidates: s.Candidates,
 		})
 	}
 	return out
@@ -706,6 +771,20 @@ func (a *App) appendHistory(entries []output.Entry, at time.Time, roundID string
 	if err := a.history.Append(records); err != nil {
 		log.Printf("写入历史失败: %v", err)
 	}
+}
+
+// pruneStateDomains 删除不在 keep 集合中的域名状态。
+// 键先做小写+去空格归一：Decide 的键保留配置原文大小写，直接比对会漏删或误删。
+func (a *App) pruneStateDomains(keep map[string]bool) {
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+	for name := range a.state.Domains {
+		norm := strings.ToLower(strings.TrimSpace(name))
+		if !keep[norm] {
+			delete(a.state.Domains, name)
+		}
+	}
+	a.stateDomainsSize.Store(int64(len(a.state.Domains)))
 }
 
 func (a *App) handle(w http.ResponseWriter, r *http.Request) {
@@ -877,6 +956,11 @@ func (a *App) startRefresh(domains []string) (string, bool, bool) {
 	return task.ID, false, false
 }
 
+// refreshLockWait 是后台刷新任务拿轮次锁的等待上限。整轮预算上限 15 分钟，
+// 再加 2 分钟余量保证排队的正常轮次能完成；拿不到锁说明锁被异常占用，
+// 任务置为失败让前端看到明确状态而非永远 running。
+const refreshLockWait = 17 * time.Minute
+
 // runRefresh 执行后台轮次并回填任务状态。
 // 使用独立 context：请求结束后探测不应被取消，各阶段仍有自身的超时控制。
 func (a *App) runRefresh(task *refreshTask, domains []string) {
@@ -884,13 +968,13 @@ func (a *App) runRefresh(task *refreshTask, domains []string) {
 	var err error
 	if len(domains) == 0 {
 		// 手动整轮刷新视为用户要最新发现：强制重新展开子域名，绕过 TTL 缓存。
-		minutes, err = a.doRoundFor(context.Background(), nil, true)
+		minutes, err = a.doRoundFor(context.Background(), nil, true, refreshLockWait)
 	} else {
 		only := make(map[string]bool, len(domains))
 		for _, name := range domains {
 			only[name] = true
 		}
-		minutes, err = a.doRoundFor(context.Background(), only, false)
+		minutes, err = a.doRoundFor(context.Background(), only, false, refreshLockWait)
 	}
 	if err == nil {
 		if n, aghErr := a.rebuildAGH(time.Now()); aghErr != nil {
@@ -987,6 +1071,8 @@ func (a *App) handleDomainsConfig(w http.ResponseWriter, r *http.Request) {
 		log.Printf("配置已更新: %s（%d 字节）", a.configPath, len(body))
 		// 监听地址必须与分流行同步：保存即重绑，规则随实际监听地址一起变化。
 		a.applyDNSListen(parsed.Defaults.DNS.Listen)
+		// 域名增删后即时回收展开缓存：删除的域名不再重展开，避免条目长期残留。
+		a.evictExpandCacheExcept(parsedDomainSet(parsed.Domains))
 		// 增删域名后即时刷新 AGH 上游分流行，避免用户已删除的域名仍被分流过来。
 		a.refreshDNSFamiliesFromConfig()
 		// 保存后立即把禁用域名从产物中移除，避免页面显示禁用但订阅仍在生效。
@@ -1117,6 +1203,7 @@ func (a *App) expandCachePut(domain string, o expand.Options, results []expand.R
 		results:     results,
 		savedAt:     time.Now(),
 	}
+	a.expandCacheSize.Store(int64(len(a.expandCache)))
 }
 
 // expandCacheEvict 删除某域名的缓存条目（手动刷新强制重展开时调用）。
@@ -1124,6 +1211,71 @@ func (a *App) expandCacheEvict(domain string) {
 	a.expandCacheMu.Lock()
 	defer a.expandCacheMu.Unlock()
 	delete(a.expandCache, domain)
+	a.expandCacheSize.Store(int64(len(a.expandCache)))
+}
+
+// expandSweepInterval 是扩展缓存后台清扫的周期。条目量级是「域名数 × 一次性展开结果」，
+// 泄漏增长极慢，30 分钟粒度足够；清扫本身持锁时间微秒级，不与探测轮竞争。
+const expandSweepInterval = 30 * time.Minute
+
+// parsedDomainSet 返回配置中域名名（原文 + 小写）的集合。缓存与退避状态的键
+// 大小写不保证归一，修剪时用两套键同时匹配，避免大小写混写误判为「已删除」。
+func parsedDomainSet(domains []config.Domain) map[string]bool {
+	set := make(map[string]bool, len(domains)*2)
+	for _, dom := range domains {
+		name := strings.TrimSpace(dom.Name)
+		if name == "" {
+			continue
+		}
+		set[name] = true
+		set[strings.ToLower(name)] = true
+	}
+	return set
+}
+
+// expandSweeper 定期清扫扩展缓存：删除「已不在配置中」与「超过 TTL」的条目。
+// 惰性 TTL 检查只在读取时发生，直接删域名或改 JSON 文件的路径无人调用 Evict，
+// 此清扫兜住这些漏网路径，保证缓存条目数有界。
+func (a *App) expandSweeper(ctx context.Context) {
+	ticker := time.NewTicker(expandSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		rt, err := config.Load()
+		if err != nil {
+			continue
+		}
+		a.sweepExpandCache(parsedDomainSet(rt.Config.Domains), rt.Config.Defaults.ExpandCacheTTLHours)
+	}
+}
+
+// sweepExpandCache 删除不在配置中或超过 TTL 的缓存条目。
+func (a *App) sweepExpandCache(active map[string]bool, ttlHours int) {
+	a.expandCacheMu.Lock()
+	defer a.expandCacheMu.Unlock()
+	for name, e := range a.expandCache {
+		if !active[name] || (ttlHours > 0 && time.Since(e.savedAt) >= time.Duration(ttlHours)*time.Hour) {
+			delete(a.expandCache, name)
+		}
+	}
+	a.expandCacheSize.Store(int64(len(a.expandCache)))
+}
+
+// evictExpandCacheExcept 删除不在 keep 集合中的缓存条目（配置写路径即时回收）。
+// 只删「配置里彻底消失的」；禁用的域名条目保留，TTL 到期由清扫兜底。
+func (a *App) evictExpandCacheExcept(keep map[string]bool) {
+	a.expandCacheMu.Lock()
+	defer a.expandCacheMu.Unlock()
+	for name := range a.expandCache {
+		if !keep[name] {
+			delete(a.expandCache, name)
+		}
+	}
+	a.expandCacheSize.Store(int64(len(a.expandCache)))
 }
 
 // handleExpand 按需展开主域名，返回发现的子域名及其解析结果。
@@ -1324,8 +1476,12 @@ func (a *App) handleSwitch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.roundMu.Lock()
-	defer a.roundMu.Unlock()
+	if !a.roundMu.tryLockTimeout(2*time.Second) {
+		a.lockBusyCount.Add(1)
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": "当前有探测轮次进行中，请稍后重试"})
+		return
+	}
+	defer a.roundMu.unlock()
 	now := time.Now()
 
 	a.stateMu.Lock()
@@ -1415,8 +1571,11 @@ var (
 
 // rebuildAGH 用当前快照重写 agh.txt，不重新探测。调用方无需持有 roundMu。
 func (a *App) rebuildAGH(now time.Time) (int, error) {
-	a.roundMu.Lock()
-	defer a.roundMu.Unlock()
+	if !a.roundMu.tryLockTimeout(2*time.Second) {
+		a.lockBusyCount.Add(1)
+		return 0, errRoundBusy
+	}
+	defer a.roundMu.unlock()
 	a.mu.RLock()
 	snap := a.snap
 	a.mu.RUnlock()
@@ -1463,9 +1622,10 @@ func (a *App) handleRefreshAGH(w http.ResponseWriter, r *http.Request) {
 	n, err := a.rebuildAGH(time.Now())
 	if err != nil {
 		code := http.StatusInternalServerError
-		if errors.Is(err, errNoSnapshot) {
+		switch {
+		case errors.Is(err, errNoSnapshot):
 			code = http.StatusServiceUnavailable
-		} else if errors.Is(err, errNoValidIP) {
+		case errors.Is(err, errNoValidIP), errors.Is(err, errRoundBusy):
 			code = http.StatusConflict
 		}
 		writeJSON(w, code, map[string]any{"ok": false, "error": err.Error()})
@@ -1504,6 +1664,14 @@ func (a *App) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		resp["dns_enabled"] = a.dnsSrv != nil
 		resp["last_round"] = snap.Status.GeneratedAt.Format(time.RFC3339)
 	}
+	// 长期运行观测：轮次耗时与状态、超时/锁排队计数、各缓存规模。
+	resp["round_duration_ms"] = a.roundDurationMs.Load()
+	resp["round_last_status"] = a.roundLastStatus.Load()
+	resp["round_timeout_count"] = a.roundTimeoutCount.Load()
+	resp["round_lock_busy"] = a.lockBusyCount.Load()
+	resp["expand_cache_size"] = a.expandCacheSize.Load()
+	resp["watch_states_size"] = a.watchStatesSize.Load()
+	resp["state_domains_size"] = a.stateDomainsSize.Load()
 	for k, v := range a.watchdogStats() {
 		resp[k] = v
 	}
@@ -1526,6 +1694,39 @@ func (a *App) watchdogStats() map[string]any {
 		out["watch_last_triggered"] = a.watchLastTriggered
 	}
 	return out
+}
+
+// updateCheckMinInterval 是手动检查更新的最小间隔，防刷导致 GitHub 请求风暴。
+const updateCheckMinInterval = 60 * time.Second
+
+// handleUpdateCheck 手动触发一次版本检查（界面「关于」面板的「检查更新」按钮）。
+// 60 秒内重复触发返回 429；调用已存在的 Checker.Check/Status，不引入新的检查逻辑。
+func (a *App) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "仅支持 POST"})
+		return
+	}
+	a.updateCheckMu.Lock()
+	if time.Since(a.lastUpdateCheck) < updateCheckMinInterval {
+		a.updateCheckMu.Unlock()
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{"ok": false, "error": "检查过于频繁，请 60 秒后再试"})
+		return
+	}
+	a.lastUpdateCheck = time.Now()
+	a.updateCheckMu.Unlock()
+
+	a.updateChecker.Check(r.Context())
+	latest, available, checkedAt := a.updateChecker.Status()
+	resp := map[string]any{
+		"ok":               true,
+		"latest_version":   latest,
+		"update_available": available,
+	}
+	if !checkedAt.IsZero() {
+		resp["checked_at"] = checkedAt.Format(time.RFC3339)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleDisable 批量启用/禁用域名，立即写回配置并从产物中移除被禁用的域名。
@@ -1559,8 +1760,12 @@ func (a *App) handleDisable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.roundMu.Lock()
-	defer a.roundMu.Unlock()
+	if !a.roundMu.tryLockTimeout(5*time.Second) {
+		a.lockBusyCount.Add(1)
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": "当前有探测轮次进行中，请稍后重试"})
+		return
+	}
+	defer a.roundMu.unlock()
 
 	raw, err := os.ReadFile(a.configPath)
 	if err != nil {
@@ -1631,6 +1836,10 @@ func (a *App) handleDisable(w http.ResponseWriter, r *http.Request) {
 	// 家族清单必须即时跟随：禁用后若仍留在 AGH 上游行里，AGH 会把查询送来，
 	// 而我们对该域名答 REFUSED，等于把用户网络解析搞挂。
 	a.refreshDNSFamiliesFromConfig()
+	// 域名集合变化后即时回收展开缓存（用已写盘配置的域名集合判定）。
+	if rt, err := config.Load(); err == nil {
+		a.evictExpandCacheExcept(parsedDomainSet(rt.Config.Domains))
+	}
 	if req.Disabled {
 		if err := a.removeFromSnapshot(affected); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
@@ -1718,12 +1927,20 @@ func (a *App) index(w http.ResponseWriter, r *http.Request) {
 			active++
 		}
 	}
+	// 接入模式与配置单一事实来源保持一致：dns.listen 为空即订阅模式。
+	mode := "dns"
+	if rt, err := config.Load(); err == nil {
+		if strings.TrimSpace(rt.Config.Defaults.DNS.Listen) == "" {
+			mode = "subscribe"
+		}
+	}
 	data := struct {
 		GeneratedAt     string
 		ScheduleMinutes int
 		ActiveCount     int
 		DomainCount     int
 		Ready           bool
+		Mode            string
 		Domains         []domainView
 		Version         string
 		ProjectURL      string
@@ -1734,6 +1951,7 @@ func (a *App) index(w http.ResponseWriter, r *http.Request) {
 		ActiveCount:     active,
 		DomainCount:     len(views),
 		Ready:           active > 0,
+		Mode:            mode,
 		Domains:         views,
 		Version:         a.version,
 		ProjectURL:      "https://github.com/wulinwei959/ip-optimizer",

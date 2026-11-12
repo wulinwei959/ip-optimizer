@@ -210,3 +210,19 @@ func TestExpandCacheTTL(t *testing.T) {
 		t.Fatalf("TTL=240 应合法，实际 %v", err)
 	}
 }
+
+// 1.5.0 移除了 suppress_aaaa 与 outputs：旧配置里残留的这两个键
+// 必须被 JSON 解析静默忽略，不导致解析失败（向后兼容）。
+func TestLegacyRemovedKeysIgnored(t *testing.T) {
+	raw := []byte(`{
+  "domains": [{"name": "github.com", "suppress_aaaa": false}],
+  "defaults": {"outputs": ["hosts.txt", "agh.txt", "status.json"]}
+}`)
+	c, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("含残留键的旧配置应可解析: %v", err)
+	}
+	if len(c.Domains) != 1 || c.Domains[0].Name != "github.com" {
+		t.Fatalf("域名解析不符: %+v", c.Domains)
+	}
+}

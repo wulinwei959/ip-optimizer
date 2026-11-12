@@ -59,7 +59,7 @@ $env:SKIP_PACK='1'; powershell -NoProfile -File deploy/scripts/build-native-fpk.
 
 **接入 AdGuard Home（二选一，不要同时启用）**
 
-- **推荐：DNS 应答器。** 打开状态页「DNS 应答服务」卡片，复制分流规则，粘贴到 AGH 的「设置 → DNS 设置 → 上游 DNS 服务器」末尾，形如 `[/github.com/raw.githubusercontent.com/]127.0.0.1:18053`。IP 切换后最多一个 TTL（默认 60 秒）即生效，不受 AGH 订阅刷新间隔限制。
+- **推荐：DNS 应答器。** 打开状态页「接入方式」卡片，复制分流规则，粘贴到 AGH 的「设置 → DNS 设置 → 上游 DNS 服务器」末尾，形如 `[/github.com/raw.githubusercontent.com/]127.0.0.1:18053`。IP 切换后最多一个 TTL（默认 60 秒）即生效，不受 AGH 订阅刷新间隔限制。
 - **兼容：过滤器订阅。** 订阅地址推荐 `http://<NAS内网IP>:18088/agh.txt`（覆盖子域且 AAAA 天然 NODATA），或 `http://<NAS内网IP>:18088/hosts.txt`。在 AdGuard Home「过滤器 → DNS 封锁清单」添加，更新间隔改为 1 小时。安装后也可从桌面图标打开的状态页一键复制订阅地址。
 
 应答器的 UDP 端口（默认 `18053`）与 HTTP 端口（`18088`）是两条独立链路，FPK 只需 `service_port=18088`；DNS 端口由 `defaults.dns.listen` 控制。
